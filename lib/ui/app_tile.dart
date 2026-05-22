@@ -3,6 +3,17 @@ import 'package:flutter/material.dart';
 import '../models/app_entry.dart';
 import '../services/app_service.dart';
 
+/// Font size of the app name in a grid tile.
+const double _kNameFontSize = 12;
+
+/// Line-height multiplier of the app name.
+const double _kNameLineHeight = 1.1;
+
+/// Height reserved for the app name: always two lines, so a single-line name
+/// occupies the same vertical space as a two-line one and every tile in a
+/// row keeps its icon at the same height.
+const double _kNameHeight = _kNameFontSize * _kNameLineHeight * 2;
+
 /// A single grid cell: app icon above its name, with a 'new' badge for
 /// recently installed apps.
 class AppTile extends StatelessWidget {
@@ -50,12 +61,18 @@ class AppTile extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 6),
-            Text(
-              app.label,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 12, height: 1.1),
+            SizedBox(
+              height: _kNameHeight,
+              child: Text(
+                app.label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: _kNameFontSize,
+                  height: _kNameLineHeight,
+                ),
+              ),
             ),
           ],
         ),

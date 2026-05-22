@@ -33,8 +33,6 @@ class _Scored {
 class SearchEngine {
   SearchEngine._();
 
-  static String _norm(String s) => s.toLowerCase().replaceAll(' ', '');
-
   static SearchResults search(
     String rawQuery,
     List<AppEntry> apps,
@@ -43,7 +41,10 @@ class SearchEngine {
     final query = rawQuery.trim();
     if (query.isEmpty) return SearchResults();
 
-    final q = _norm(query);
+    final q = Korean.normalize(query);
+    final qRoman = Korean.romanize(query);
+    final qQwerty = Korean.qwerty(query);
+    final qPhonetic = Korean.phoneticKey(query);
     final chosungQuery = Korean.isChosungOnly(query);
     final used = <String>{};
 
@@ -51,8 +52,8 @@ class SearchEngine {
     //    plus Korean 초성 search against the app name.
     final matchScored = <_Scored>[];
     for (final app in apps) {
-      final label = _norm(app.label);
-      final pkg = _norm(app.packageName);
+      final label = app.labelNorm;
+      final pkg = app.packageNorm;
       double score = 0;
       if (label == q) {
         score = 5;
@@ -63,9 +64,7 @@ class SearchEngine {
       } else if (pkg.contains(q)) {
         score = 2;
       }
-      if (score == 0 &&
-          chosungQuery &&
-          Korean.chosung(app.label).contains(query)) {
+      if (score == 0 && chosungQuery && app.chosung.contains(query)) {
         score = 1;
       }
       if (score > 0) matchScored.add(_Scored(app, score));
@@ -89,55 +88,77 @@ class SearchEngine {
     }
     final historyList = _take(historyScored, used);
 
-    // 3. similar — phonetic match. First an exact substring test on the
-    //    Revised-Romanization, then a fuzzy match on the phonetic skeleton
-    //    so English spelling and Korean transcription line up despite the
-    //    epenthetic 으 and missing f/v/z sounds.
-    final queryForms = {q, Korean.romanize(query)}..removeWhere((e) => e.isEmpty);
-    final qPhonetic = Korean.phoneticKey(query);
+    // 3. similar — the query is not literally in the name but sounds or
+    //    types like it. Three signals, each scored on a 0..~1 scale:
+    //      a) substring of a normalized / romanized / QWERTY-layout form,
+    //         so wrong-IME typing ("zkzkdh" → 카카오) is recovered here;
+    //      b) fuzzy match on the phonetic skeleton, so English spelling and
+    //         Korean transcription line up despite the epenthetic 으 and
+    //         missing f/v/z sounds;
+    //      c) initials match, so "gp" finds "Google Play".
+    final queryForms = {q, qRoman, qQwerty}..removeWhere((e) => e.isEmpty);
     final similarScored = <_Scored>[];
     for (final app in apps) {
       if (used.contains(app.packageName)) continue;
-      final appForms = {_norm(app.label), Korean.romanize(app.label)}
+      final appForms = {app.labelNorm, app.roman, app.qwerty}
         ..removeWhere((e) => e.isEmpty);
       double best = 0;
+      // 3a. substring across forms; a hit at a word boundary scores higher.
       for (final qf in queryForms) {
         for (final af in appForms) {
-          if (af.contains(qf)) {
-            final ratio = qf.length / af.length;
-            if (ratio > best) best = ratio;
-          }
+          final at = af.indexOf(qf);
+          if (at < 0) continue;
+          final score = qf.length / af.length + _wordBoundaryBonus(af, at);
+          if (score > best) best = score;
         }
       }
-      if (qPhonetic.length >= 3) {
-        final appPhonetic = Korean.phoneticKey(app.label);
-        if (appPhonetic.length >= 2) {
-          final dist = _fuzzySubstringDistance(qPhonetic, appPhonetic);
-          final allowed = (qPhonetic.length ~/ 3).clamp(1, 99);
-          if (dist <= allowed) {
-            // Kept just below 1.0 so exact substring hits still rank first.
-            final fuzzy = 0.9 * (1 - dist / qPhonetic.length);
-            if (fuzzy > best) best = fuzzy;
-          }
+      // 3b. fuzzy phonetic-skeleton match.
+      if (qPhonetic.length >= 3 && app.phonetic.length >= 2) {
+        final dist = _fuzzySubstringDistance(qPhonetic, app.phonetic);
+        final allowed = (qPhonetic.length ~/ 3).clamp(1, 99);
+        if (dist <= allowed) {
+          // Kept just below 1.0 so exact substring hits still rank first.
+          final fuzzy = 0.9 * (1 - dist / qPhonetic.length);
+          if (fuzzy > best) best = fuzzy;
+        }
+      }
+      // 3c. initials / abbreviation match (English app names only).
+      if (q.length >= 2 && app.initials.length >= 2) {
+        final at = app.initials.indexOf(q);
+        if (at >= 0) {
+          final score = (0.85 - at * 0.05).clamp(0.0, 1.0);
+          if (score > best) best = score;
         }
       }
       if (best > 0) similarScored.add(_Scored(app, best));
     }
     final similar = _take(similarScored, used);
 
-    // 4. related — character-overlap match; only shown for 2+ char queries.
+    // 4. related — loose character-overlap / subsequence match; only shown
+    //    for 2+ char queries. Subsequence catches names where every query
+    //    character appears in order with gaps (e.g. "ggl" → "google"); a
+    //    tighter spread of those characters scores higher.
     final relatedScored = <_Scored>[];
     if (query.length >= 2) {
       final relQuery = chosungQuery ? query : q;
       for (final app in apps) {
         if (used.contains(app.packageName)) continue;
         final target = chosungQuery
-            ? Korean.chosung(app.label)
-            : _norm('${app.label} ${app.packageName}');
+            ? app.chosung
+            : '${app.labelNorm}${app.packageNorm}';
         final lcs = _longestCommonSubstring(relQuery, target);
         final overlap = _charOverlap(relQuery, target);
-        if (lcs == 0 && overlap == 0) continue;
-        relatedScored.add(_Scored(app, (lcs * 10 + overlap).toDouble()));
+        var score = (lcs * 10 + overlap).toDouble();
+        if (!chosungQuery &&
+            qRoman.length >= 3 &&
+            _isSubsequence(qRoman, app.roman)) {
+          final spread = _subsequenceSpread(qRoman, app.roman);
+          final tightness =
+              ((qRoman.length - 1) / (spread + 1)).clamp(0.0, 1.0);
+          score += 15 + tightness * 10;
+        }
+        if (score <= 0) continue;
+        relatedScored.add(_Scored(app, score));
       }
     }
     final related = _take(relatedScored, used);
@@ -153,7 +174,7 @@ class SearchEngine {
   /// Applies the same match logic to a stored history [keyword].
   static bool _keywordMatches(
       String query, String q, bool chosungQuery, String keyword) {
-    if (_norm(keyword).contains(q)) return true;
+    if (Korean.normalize(keyword).contains(q)) return true;
     if (chosungQuery && Korean.chosung(keyword).contains(query)) return true;
     return false;
   }
@@ -232,5 +253,47 @@ class SearchEngine {
       }
     }
     return n;
+  }
+
+  /// Ranking bonus when a substring match starts at a word boundary, so a
+  /// hit on a word's first letter outranks one buried mid-word. Returns 0
+  /// when [pos] is inside a word.
+  static double _wordBoundaryBonus(String haystack, int pos) {
+    if (pos == 0) return 0.10;
+    if (pos < 0 || pos >= haystack.length) return 0;
+    final prev = haystack[pos - 1];
+    if (prev == ' ' || prev == '-' || prev == '_' || prev == '.') return 0.05;
+    return 0;
+  }
+
+  /// True when every character of [pattern] appears in [text] in order,
+  /// gaps allowed (e.g. "ggl" is a subsequence of "google").
+  static bool _isSubsequence(String pattern, String text) {
+    if (pattern.isEmpty) return true;
+    var i = 0;
+    for (var j = 0; j < text.length && i < pattern.length; j++) {
+      if (text[j] == pattern[i]) i++;
+    }
+    return i == pattern.length;
+  }
+
+  /// Index span between the first and last matched character of a
+  /// subsequence alignment of [pattern] in [text] — smaller means the
+  /// matched characters sit closer together. Returns [text].length when
+  /// [pattern] is not a subsequence of [text].
+  static int _subsequenceSpread(String pattern, String text) {
+    if (pattern.isEmpty) return 0;
+    var first = -1;
+    var last = -1;
+    var i = 0;
+    for (var j = 0; j < text.length && i < pattern.length; j++) {
+      if (text[j] == pattern[i]) {
+        if (first == -1) first = j;
+        last = j;
+        i++;
+      }
+    }
+    if (first < 0 || i < pattern.length) return text.length;
+    return last - first;
   }
 }

@@ -48,3 +48,6 @@ app.*.map.json
 **/key.properties
 **/*.jks
 **/*.keystore
+
+# Claude Code MCP 설정 (머신-종속 로컬 경로 포함)
+.mcp.json

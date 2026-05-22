@@ -67,7 +67,8 @@ class MainActivity : FlutterActivity() {
             val seen = HashSet<String>()
             for (info in resolved) {
                 val pkg = info.activityInfo.packageName
-                if (pkg == packageName || !seen.add(pkg)) continue
+                // The launcher hides no apps — even SearchIt itself is listed.
+                if (!seen.add(pkg)) continue
                 try {
                     val appInfo = pm.getApplicationInfo(pkg, 0)
                     val pkgInfo = pm.getPackageInfo(pkg, 0)

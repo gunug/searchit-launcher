@@ -4,6 +4,12 @@ class Korean {
   Korean._();
 
   static const _choCompat = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ';
+  static const _jungCompat = 'ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ';
+  static const _jongCompat = [
+    '', 'ㄱ', 'ㄲ', 'ㄳ', 'ㄴ', 'ㄵ', 'ㄶ', 'ㄷ', 'ㄹ', 'ㄺ',
+    'ㄻ', 'ㄼ', 'ㄽ', 'ㄾ', 'ㄿ', 'ㅀ', 'ㅁ', 'ㅂ', 'ㅄ', 'ㅅ',
+    'ㅆ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ',
+  ];
 
   static const _choRoman = [
     'g', 'kk', 'n', 'd', 'tt', 'r', 'm', 'b', 'pp', 's',
@@ -20,6 +26,23 @@ class Korean {
     'lm', 'lp', 'ls', 'lt', 'lp', 'lh', 'm', 'p', 'ps', 's',
     'ss', 'ng', 'j', 'ch', 'k', 't', 'p', 'h',
   ];
+
+  /// Maps each Hangul jamo to the QWERTY key(s) it sits on in the standard
+  /// 2-set (두벌식) layout. Used to recover a word typed with the wrong IME:
+  /// "rkrkdh" (English keys) and "가가오" land on the same key sequence.
+  static const _jamoToQwerty = {
+    'ㄱ': 'r', 'ㄲ': 'R', 'ㄴ': 's', 'ㄷ': 'e', 'ㄸ': 'E', 'ㄹ': 'f',
+    'ㅁ': 'a', 'ㅂ': 'q', 'ㅃ': 'Q', 'ㅅ': 't', 'ㅆ': 'T', 'ㅇ': 'd',
+    'ㅈ': 'w', 'ㅉ': 'W', 'ㅊ': 'c', 'ㅋ': 'z', 'ㅌ': 'x', 'ㅍ': 'v',
+    'ㅎ': 'g',
+    'ㄳ': 'rt', 'ㄵ': 'sw', 'ㄶ': 'sg', 'ㄺ': 'fr', 'ㄻ': 'fa', 'ㄼ': 'fq',
+    'ㄽ': 'ft', 'ㄾ': 'fx', 'ㄿ': 'fv', 'ㅀ': 'fg', 'ㅄ': 'qt',
+    'ㅏ': 'k', 'ㅐ': 'o', 'ㅑ': 'i', 'ㅒ': 'O', 'ㅓ': 'j', 'ㅔ': 'p',
+    'ㅕ': 'u', 'ㅖ': 'P', 'ㅗ': 'h', 'ㅛ': 'y', 'ㅜ': 'n', 'ㅠ': 'b',
+    'ㅡ': 'm', 'ㅣ': 'l',
+    'ㅘ': 'hk', 'ㅙ': 'ho', 'ㅚ': 'hl', 'ㅝ': 'nj', 'ㅞ': 'np',
+    'ㅟ': 'nl', 'ㅢ': 'ml',
+  };
 
   static const _base = 0xAC00;
   static const _last = 0xD7A3;
@@ -49,6 +72,11 @@ class Korean {
     return true;
   }
 
+  /// Canonical comparison form: lowercased with spaces stripped, so case and
+  /// spacing never break a query ↔ app-name match.
+  static String normalize(String text) =>
+      text.toLowerCase().replaceAll(' ', '');
+
   /// Revised-romanization of [text]; non-Hangul characters pass through.
   /// Romanization is the common ground for English ↔ Korean similar search.
   static String romanize(String text) {
@@ -64,6 +92,58 @@ class Korean {
       }
     }
     return sb.toString().toLowerCase();
+  }
+
+  /// Projects [text] onto the QWERTY keys a 2-set Korean keyboard would emit.
+  ///
+  /// This catches the very common mistake of typing a word with the IME in
+  /// the wrong mode: an app named "카카오" and the English keystrokes a user
+  /// would hit for it both map to "zkzkdh". Non-Hangul characters (including
+  /// already-Latin queries) pass through unchanged, so the projection is safe
+  /// to apply to both sides of a comparison.
+  static String qwerty(String text) {
+    final sb = StringBuffer();
+    for (final rune in text.runes) {
+      if (_isSyllable(rune)) {
+        final c = rune - _base;
+        sb.write(_jamoToQwerty[_choCompat[c ~/ 588]] ?? '');
+        sb.write(_jamoToQwerty[_jungCompat[(c % 588) ~/ 28]] ?? '');
+        final jong = c % 28;
+        if (jong > 0) sb.write(_jamoToQwerty[_jongCompat[jong]] ?? '');
+      } else {
+        final ch = String.fromCharCode(rune);
+        sb.write(_jamoToQwerty[ch] ?? ch);
+      }
+    }
+    return sb.toString().toLowerCase();
+  }
+
+  /// Extracts the initials of an English app name for abbreviation search,
+  /// e.g. "Google Play" → "gp", "YouTube" → "yt". A letter counts as an
+  /// initial when it starts the string, follows a word separator, or is an
+  /// uppercase letter after a lowercase one (camelCase boundary).
+  static String initials(String text) {
+    bool isLatinLetter(int u) =>
+        (u >= 0x41 && u <= 0x5A) || (u >= 0x61 && u <= 0x7A);
+
+    final sb = StringBuffer();
+    for (var i = 0; i < text.length; i++) {
+      final c = text[i];
+      if (!isLatinLetter(c.codeUnitAt(0))) continue;
+      if (i == 0) {
+        sb.write(c.toLowerCase());
+        continue;
+      }
+      final prev = text[i - 1];
+      final isWordStart =
+          prev == ' ' || prev == '\t' || prev == '-' || prev == '_' || prev == '.';
+      final prevLower = prev.toLowerCase() == prev && prev.toUpperCase() != prev;
+      final cUpper = c.toUpperCase() == c && c.toLowerCase() != c;
+      if (isWordStart || (prevLower && cUpper)) {
+        sb.write(c.toLowerCase());
+      }
+    }
+    return sb.toString();
   }
 
   /// Single-consonant equivalence folds — sounds Korean does not distinguish.
