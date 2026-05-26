@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/app_entry.dart';
+
 /// One stored search keyword and the apps that were launched under it from
 /// the similar / related sections.
 class HistoryEntry {
@@ -33,6 +35,7 @@ class StorageService {
   static const _launchHistoryKey = 'launch_history_v2';
   static const _launchRetentionDays = 30;
   static const _dayBadgeEarnedKey = 'day_badge_earned';
+  static const _appCacheKey = 'app_cache_v1';
 
   static SharedPreferences? _prefs;
 
@@ -110,14 +113,36 @@ class StorageService {
 
   // --- Day badge earned set -------------------------------------------------
 
-  static Future<Set<String>> loadDayBadgeEarned() async {
-    return ((await _store).getStringList(_dayBadgeEarnedKey) ?? []).toSet();
+  static Future<Set<String>> loadDayBadgeEarned() async =>
+      ((await _store).getStringList(_dayBadgeEarnedKey) ?? []).toSet();
+
+  static Future<void> saveDayBadgeEarned(Set<String> earned) async =>
+      (await _store).setStringList(_dayBadgeEarnedKey, earned.toList());
+
+  // --- App metadata cache (no icons) ----------------------------------------
+
+  /// Returns the last-saved app list metadata. Empty list on first launch.
+  static Future<List<AppEntry>> loadCachedApps() async {
+    final raw = (await _store).getString(_appCacheKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      final list = jsonDecode(raw) as List<dynamic>;
+      return list
+          .map((e) => AppEntry.fromCacheJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
   }
 
-  static Future<void> saveDayBadgeEarned(Set<String> earned) async {
-    await (await _store)
-        .setStringList(_dayBadgeEarnedKey, earned.toList());
-  }
+  /// Saves app metadata to cache (icons are excluded).
+  static Future<void> saveCachedApps(List<AppEntry> apps) async =>
+      (await _store).setString(
+        _appCacheKey,
+        jsonEncode(apps.map((a) => a.toCacheJson()).toList()),
+      );
+
+  // --- Launch timestamps ----------------------------------------------------
 
   /// Appends the current timestamp for [packageName] and prunes entries older
   /// than [_launchRetentionDays] so storage does not grow unboundedly.

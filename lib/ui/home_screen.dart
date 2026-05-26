@@ -7,8 +7,9 @@ import '../services/app_service.dart';
 import '../services/storage_service.dart';
 import 'app_tile.dart';
 
-/// The launcher home screen: a search box over a ranked results grid,
-/// or the default view (최근 사용 + 자주 사용) when the query is empty.
+/// 두 페이지로 구성된 런처 홈.
+/// 왼쪽(0): 빈도순 전체 앱 그리드
+/// 오른쪽(1): 검색창 + 최근 사용
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -17,20 +18,18 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  // Change _crossAxisCount to adjust the grid width everywhere at once.
   static const int _crossAxisCount = 4;
-  // Number of rows shown in the 최근 사용 section.
-  static const int _recentRows = 3;
 
   static const _gridDelegate = SliverGridDelegateWithFixedCrossAxisCount(
     crossAxisCount: _crossAxisCount,
     childAspectRatio: 0.78,
   );
 
-  final _controller = TextEditingController();
+  final _searchController = TextEditingController();
+  final _pageController = PageController();
 
   List<AppEntry> _apps = [];
-  final Map<String, AppEntry> _byPackage = {};
+  Map<String, AppEntry> _byPackage = {};
   List<HistoryEntry> _history = [];
   List<String> _recents = [];
   Map<String, List<DateTime>> _launchHistory = {};
@@ -49,7 +48,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _controller.dispose();
+    _searchController.dispose();
+    _pageController.dispose();
     super.dispose();
   }
 
@@ -59,11 +59,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _load() async {
-    final apps = await AppService.getApps();
-    final history = await StorageService.loadHistory();
-    final recents = await StorageService.loadRecents();
-    final rawHistory = await StorageService.loadLaunchHistory();
-    var dayBadgeEarned = await StorageService.loadDayBadgeEarned();
+    // 모든 storage 읽기 + native 메타데이터 쿼리를 동시에 시작
+    final cachedAppsF = StorageService.loadCachedApps();
+    final historyF = StorageService.loadHistory();
+    final recentsF = StorageService.loadRecents();
+    final rawHistoryF = StorageService.loadLaunchHistory();
+    final dayBadgeF = StorageService.loadDayBadgeEarned();
+    final metadataF = AppService.getAppsMetadata();
+
+    // storage는 native보다 빠르게 완료됨
+    final cachedApps = await cachedAppsF;
+    final history = await historyF;
+    final recents = await recentsF;
+    final rawHistory = await rawHistoryF;
+    var dayBadgeEarned = await dayBadgeF;
 
     final launchHistory = rawHistory.map(
       (k, v) => MapEntry(
@@ -72,48 +81,83 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ),
     );
 
-    // Update dayBadgeEarned: grant acquisition or revoke maintenance for each app.
-    bool earnedChanged = false;
-    for (final app in apps) {
+    // Phase 1: 캐시된 메타데이터로 즉시 UI 표시 (아이콘은 placeholder)
+    if (_loading && cachedApps.isNotEmpty && mounted) {
+      setState(() {
+        _apps = cachedApps;
+        _byPackage = {for (final a in cachedApps) a.packageName: a};
+        _history = history;
+        _recents = recents;
+        _launchHistory = launchHistory;
+        _loading = false;
+      });
+    }
+
+    // Phase 2: native 메타데이터 완료 후 앱 목록 갱신
+    final freshMeta = await metadataF;
+    await StorageService.saveCachedApps(freshMeta);
+
+    // 이미 메모리에 있는 아이콘 재활용 (resume 시 깜빡임 방지)
+    final existingIcons = {
+      for (final a in _apps)
+        if (a.icon != null) a.packageName: a.icon!
+    };
+    final merged =
+        freshMeta.map((a) => a.copyWithIcon(existingIcons[a.packageName])).toList();
+
+    // 뱃지 획득/상실 갱신
+    var badgeChanged = false;
+    for (final app in freshMeta) {
       final launches = launchHistory[app.packageName] ?? [];
-      final currentlyEarned = dayBadgeEarned.contains(app.packageName);
-      final badge = BadgeService.calculate(app, launches, currentlyEarned);
-      if (badge == AppBadge.day && !currentlyEarned) {
+      final earned = dayBadgeEarned.contains(app.packageName);
+      if (!earned && BadgeService.hasEarned(launches)) {
         dayBadgeEarned.add(app.packageName);
-        earnedChanged = true;
-      } else if (badge != AppBadge.day && currentlyEarned) {
+        badgeChanged = true;
+      } else if (earned && BadgeService.shouldRevoke(launches)) {
         dayBadgeEarned.remove(app.packageName);
-        earnedChanged = true;
+        badgeChanged = true;
       }
     }
-    if (earnedChanged) await StorageService.saveDayBadgeEarned(dayBadgeEarned);
+    if (badgeChanged) await StorageService.saveDayBadgeEarned(dayBadgeEarned);
 
     if (!mounted) return;
     setState(() {
-      _apps = apps;
-      _byPackage
-        ..clear()
-        ..addEntries(apps.map((a) => MapEntry(a.packageName, a)));
+      _apps = merged;
+      _byPackage = {for (final a in merged) a.packageName: a};
       _history = history;
       _recents = recents;
       _launchHistory = launchHistory;
       _dayBadgeEarned = dayBadgeEarned;
       _loading = false;
     });
+
+    // Phase 3: 아이콘 없는 앱만 병렬로 로드 (첫 실행 / 신규 앱)
+    final needIcons = freshMeta
+        .where((a) => !existingIcons.containsKey(a.packageName))
+        .map((a) => a.packageName)
+        .toList();
+    if (needIcons.isEmpty) return;
+
+    final newIcons = await AppService.getIcons(needIcons);
+    if (!mounted) return;
+
+    final finalApps = _apps.map((a) {
+      final icon = newIcons[a.packageName];
+      return icon != null ? a.copyWithIcon(icon) : a;
+    }).toList();
+
+    setState(() {
+      _apps = finalApps;
+      _byPackage = {for (final a in finalApps) a.packageName: a};
+    });
   }
 
-  /// Launches [app].
-  ///
-  /// [recordAsRecent] — set true only when launching from search results so
-  /// that the 최근 사용 list tracks search-driven launches exclusively.
   Future<void> _launch(
     AppEntry app, {
     String? historyKeyword,
     bool recordAsRecent = false,
   }) async {
-    if (recordAsRecent) {
-      await StorageService.recordLaunch(app.packageName);
-    }
+    if (recordAsRecent) await StorageService.recordLaunch(app.packageName);
     await StorageService.recordLaunchTimestamp(app.packageName);
     final keyword = historyKeyword?.trim() ?? '';
     if (keyword.isNotEmpty) {
@@ -122,71 +166,204 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await AppService.launch(app.packageName);
   }
 
+  // ---------------------------------------------------------------------------
+  // 빈도 정렬: new 배지 앱 최우선 → Σ 1/(1+경과일) → 라벨순
+  // ---------------------------------------------------------------------------
+
+  List<AppEntry> _frequentAppsSorted() {
+    final now = DateTime.now();
+
+    double weightedScore(List<DateTime> launches) => launches.fold(0.0, (sum, l) {
+          final daysAgo =
+              now.difference(l).inMicroseconds / Duration.microsecondsPerDay;
+          return sum + 1.0 / (1.0 + daysAgo);
+        });
+
+    final scored = _apps.map((app) {
+      final score = weightedScore(_launchHistory[app.packageName] ?? []);
+      return (app, score);
+    }).toList()
+      ..sort((a, b) {
+        // 1순위: new 배지
+        final newCmp = (b.$1.isNew ? 1 : 0).compareTo(a.$1.isNew ? 1 : 0);
+        if (newCmp != 0) return newCmp;
+        // 2순위: day 배지
+        final dayCmp = (_dayBadgeEarned.contains(b.$1.packageName) ? 1 : 0)
+            .compareTo(_dayBadgeEarned.contains(a.$1.packageName) ? 1 : 0);
+        if (dayCmp != 0) return dayCmp;
+        // 3순위: 빈도 점수
+        final c = b.$2.compareTo(a.$2);
+        if (c != 0) return c;
+        return a.$1.label.toLowerCase().compareTo(b.$1.label.toLowerCase());
+      });
+
+    return scored.map((e) => e.$1).toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
+    if (_loading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     return Scaffold(
       body: SafeArea(
-        child: Column(
+        child: PageView(
+          controller: _pageController,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 8, 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      autofocus: false,
-                      textInputAction: TextInputAction.search,
-                      decoration: InputDecoration(
-                        hintText: '앱 검색',
-                        prefixIcon: const Icon(Icons.search),
-                        suffixIcon: _query.isEmpty
-                            ? null
-                            : IconButton(
-                                icon: const Icon(Icons.clear),
-                                onPressed: () {
-                                  _controller.clear();
-                                  setState(() => _query = '');
-                                },
-                              ),
-                        filled: true,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(28),
-                          borderSide: BorderSide.none,
-                        ),
-                        contentPadding: EdgeInsets.zero,
-                      ),
-                      onChanged: (value) => setState(() => _query = value),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.home_outlined),
-                    tooltip: '기본 런처 설정',
-                    onPressed: AppService.openHomeSettings,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.favorite_border),
-                    tooltip: '후원하기',
-                    onPressed: _showDonationDialog,
-                  ),
-                ],
-              ),
-            ),
-            Expanded(child: _buildBody()),
+            _buildFrequentPage(),
+            _buildSearchPage(),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildBody() {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    return _query.trim().isEmpty ? _buildDefault() : _buildResults();
+  // ---------------------------------------------------------------------------
+  // 왼쪽 페이지: 빈도순 전체 앱
+  // ---------------------------------------------------------------------------
+
+  Widget _buildFrequentPage() {
+    final sorted = _frequentAppsSorted();
+    return CustomScrollView(
+      slivers: [
+        SliverToBoxAdapter(child: _pageTitle('앱 목록', 'Apps')),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
+          sliver: SliverGrid(
+            gridDelegate: _gridDelegate,
+            delegate: SliverChildBuilderDelegate(
+              (context, i) {
+                final app = sorted[i];
+                return AppTile(
+                  app: app,
+                  onTap: () => _launch(app),
+                  showDayBadge: _dayBadgeEarned.contains(app.packageName),
+                );
+              },
+              childCount: sorted.length,
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   // ---------------------------------------------------------------------------
-  // Donation dialog
+  // 오른쪽 페이지: 검색창 + 최근 사용
   // ---------------------------------------------------------------------------
+
+  Widget _buildSearchPage() {
+    return Column(
+      children: [
+        _pageTitle('최근 & 검색', 'Recent & Search'),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+          child: TextField(
+            controller: _searchController,
+            autofocus: false,
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              hintText: '앱 검색',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _query.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _searchController.clear();
+                        setState(() => _query = '');
+                      },
+                    ),
+              filled: true,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(28),
+                borderSide: BorderSide.none,
+              ),
+              contentPadding: EdgeInsets.zero,
+            ),
+            onChanged: (value) => setState(() => _query = value),
+          ),
+        ),
+        Expanded(
+          child: _query.trim().isEmpty ? _buildRecents() : _buildResults(),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRecents() {
+    final recentApps = _recents
+        .map((pkg) => _byPackage[pkg])
+        .whereType<AppEntry>()
+        .toList();
+
+    if (recentApps.isEmpty) {
+      return const Center(
+        child: Text('검색어를 입력하세요', style: TextStyle(color: Colors.grey)),
+      );
+    }
+
+    return CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          sliver: SliverGrid(
+            gridDelegate: _gridDelegate,
+            delegate: SliverChildBuilderDelegate(
+              (context, i) {
+                final app = recentApps[i];
+                return AppTile(app: app, onTap: () => _launch(app));
+              },
+              childCount: recentApps.length,
+            ),
+          ),
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+      ],
+    );
+  }
+
+  Widget _buildResults() {
+    final results =
+        SearchEngine.search(_searchController.text, _apps, _history);
+    if (results.isEmpty) {
+      return const Center(
+        child: Text('검색 결과 없음', style: TextStyle(color: Colors.grey)),
+      );
+    }
+    return CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          sliver: SliverGrid(
+            gridDelegate: _gridDelegate,
+            delegate: SliverChildBuilderDelegate(
+              (context, i) {
+                final app = results[i];
+                return AppTile(
+                  app: app,
+                  onTap: () => _launch(
+                    app,
+                    historyKeyword: _searchController.text,
+                    recordAsRecent: true,
+                  ),
+                );
+              },
+              childCount: results.length,
+            ),
+          ),
+        ),
+        const SliverToBoxAdapter(child: SizedBox(height: 16)),
+      ],
+    );
+  }
 
   static const _donationOptions = [
     ('커피 한 잔', '1,100원'),
@@ -206,7 +383,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                '앱이 유용하셨다면 제작자에게 응원을 보내주세요 🙏',
+                '앱이 유용하셨다면 제작자에게 응원을 보내주세요',
                 style: TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 16),
@@ -224,7 +401,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       title: Text(label),
                       secondary: Text(
                         price,
-                        style: const TextStyle(fontWeight: FontWeight.bold),
+                        style:
+                            const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       contentPadding: EdgeInsets.zero,
                       dense: true,
@@ -240,10 +418,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: const Text('취소'),
             ),
             FilledButton(
-              onPressed: () {
-                // TODO: 인앱결제 연동 후 실제 구매 처리
-                Navigator.pop(ctx);
-              },
+              onPressed: () => Navigator.pop(ctx),
               child: const Text('후원'),
             ),
           ],
@@ -252,139 +427,45 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Default view (empty query)
-  // ---------------------------------------------------------------------------
-
-  Widget _buildDefault() {
-    final recentApps = _recents
-        .map((pkg) => _byPackage[pkg])
-        .whereType<AppEntry>()
-        .take(_crossAxisCount * _recentRows)
-        .toList();
-
-    final frequentApps = _frequentAppsSorted();
-
-    if (recentApps.isEmpty && frequentApps.isEmpty) {
-      return const Center(
-        child: Text('검색어를 입력하세요', style: TextStyle(color: Colors.grey)),
-      );
-    }
-
-    return CustomScrollView(
-      slivers: [
-        if (recentApps.isNotEmpty) ..._sectionSlivers('최근 사용', recentApps),
-        if (frequentApps.isNotEmpty) ..._sectionSlivers('자주 사용', frequentApps),
-        const SliverToBoxAdapter(child: SizedBox(height: 16)),
-      ],
-    );
-  }
-
-  /// All apps that have been launched through this launcher, capped at 40.
-  /// Sort order: badge priority (newApp > day > none) → weighted score → last launch.
-  List<AppEntry> _frequentAppsSorted() {
-    const maxApps = 40;
-    final entries = <(AppEntry, AppBadge, double, DateTime)>[];
-
-    for (final app in _apps) {
-      final launches = _launchHistory[app.packageName] ?? [];
-      if (launches.isEmpty && !app.isNew) continue;
-      final badge = BadgeService.calculate(
-          app, launches, _dayBadgeEarned.contains(app.packageName));
-      final score = BadgeService.weightedScore(launches);
-      final last = launches.isEmpty
-          ? DateTime(0)
-          : launches.reduce((a, b) => a.isAfter(b) ? a : b);
-      entries.add((app, badge, score, last));
-    }
-
-    entries.sort((a, b) {
-      // Higher enum index = higher priority (newApp=2 > day=1 > none=0).
-      final bp = b.$2.index.compareTo(a.$2.index);
-      if (bp != 0) return bp;
-      // More recent / frequent launches win.
-      final sp = b.$3.compareTo(a.$3);
-      if (sp != 0) return sp;
-      // Tie-break: most recently launched first.
-      return b.$4.compareTo(a.$4);
-    });
-
-    return entries.take(maxApps).map((e) => e.$1).toList();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Search results view
-  // ---------------------------------------------------------------------------
-
-  Widget _buildResults() {
-    final results = SearchEngine.search(_controller.text, _apps, _history);
-    if (results.isEmpty) {
-      return const Center(
-        child: Text('검색 결과 없음', style: TextStyle(color: Colors.grey)),
-      );
-    }
-    return CustomScrollView(
-      slivers: [
-        SliverPadding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          sliver: SliverGrid(
-            gridDelegate: _gridDelegate,
-            delegate: SliverChildBuilderDelegate(
-              (context, i) {
-                final app = results[i];
-                return AppTile(
-                  app: app,
-                  onTap: () => _launch(
-                    app,
-                    historyKeyword: _controller.text,
-                    recordAsRecent: true,
+  Widget _pageTitle(String ko, String en) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 4, 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  ko,
+                  textAlign: TextAlign.left,
+                  style: const TextStyle(
+                      fontSize: 22, fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  en,
+                  textAlign: TextAlign.left,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color:
+                        Theme.of(context).colorScheme.onSurface.withAlpha(128),
                   ),
-                );
-              },
-              childCount: results.length,
+                ),
+              ],
             ),
           ),
-        ),
-        const SliverToBoxAdapter(child: SizedBox(height: 16)),
-      ],
-    );
-  }
-
-  // ---------------------------------------------------------------------------
-  // Shared helpers
-  // ---------------------------------------------------------------------------
-
-  List<Widget> _sectionSlivers(String title, List<AppEntry> apps) {
-    if (apps.isEmpty) return const [];
-    return [
-      SliverToBoxAdapter(child: _sectionHeader(title)),
-      SliverPadding(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        sliver: SliverGrid(
-          gridDelegate: _gridDelegate,
-          delegate: SliverChildBuilderDelegate(
-            (context, i) {
-              final app = apps[i];
-              return AppTile(app: app, onTap: () => _launch(app));
-            },
-            childCount: apps.length,
+          IconButton(
+            icon: const Icon(Icons.home_outlined),
+            tooltip: '기본 런처 설정',
+            onPressed: AppService.openHomeSettings,
           ),
-        ),
-      ),
-    ];
-  }
-
-  Widget _sectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 6),
-      child: Text(
-        title,
-        style: TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.bold,
-          letterSpacing: 0.5,
-          color: Theme.of(context).colorScheme.primary,
-        ),
+          IconButton(
+            icon: const Icon(Icons.favorite_border),
+            tooltip: '후원하기',
+            onPressed: _showDonationDialog,
+          ),
+        ],
       ),
     );
   }

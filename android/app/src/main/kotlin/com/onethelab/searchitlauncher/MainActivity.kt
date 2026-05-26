@@ -18,15 +18,13 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
-/**
- * Hosts the platform channel that lets the Flutter launcher query, launch and
- * manage the apps installed on the device.
- */
 class MainActivity : FlutterActivity() {
 
     private val channelName = "searchit/apps"
-    private val iconSize = 72   // 52px display size; 72px gives ~1.4× margin for density
+    private val iconSize = 72
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -34,10 +32,15 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "getApps" -> loadApps(result)
+                    "getAppsMetadata" -> loadAppsMetadata(result)
+                    "getIcons" -> {
+                        @Suppress("UNCHECKED_CAST")
+                        val packages = call.argument<List<*>>("packages")
+                            ?.filterIsInstance<String>() ?: emptyList()
+                        loadIcons(packages, result)
+                    }
                     "launchApp" -> {
-                        val ok = launchApp(call.argument<String>("package"))
-                        result.success(ok)
+                        result.success(launchApp(call.argument<String>("package")))
                     }
                     "uninstallApp" -> {
                         openIntent(Intent(Intent.ACTION_DELETE).apply {
@@ -64,8 +67,11 @@ class MainActivity : FlutterActivity() {
             }
     }
 
-    /** Enumerates every app that exposes a launchable activity. */
-    private fun loadApps(result: MethodChannel.Result) {
+    /**
+     * Phase 1: returns app metadata without icons — fast enough to show the
+     * grid within ~50 ms on most devices. Also prunes stale icon cache files.
+     */
+    private fun loadAppsMetadata(result: MethodChannel.Result) {
         Thread {
             val pm = packageManager
             val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -74,67 +80,77 @@ class MainActivity : FlutterActivity() {
             val seen = HashSet<String>()
             for (info in resolved) {
                 val pkg = info.activityInfo.packageName
-                // The launcher hides no apps — even SearchIt itself is listed.
                 if (!seen.add(pkg)) continue
                 try {
                     val appInfo = pm.getApplicationInfo(pkg, 0)
                     val pkgInfo = pm.getPackageInfo(pkg, 0)
-                    @Suppress("DEPRECATION")
-                    val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        pkgInfo.longVersionCode
-                    } else {
-                        pkgInfo.versionCode.toLong()
-                    }
-                    val iconBytes = cachedIcon(pkg, versionCode) {
-                        drawableToPng(info.loadIcon(pm))
-                    }
                     apps.add(
                         mapOf(
                             "label" to info.loadLabel(pm).toString(),
                             "package" to pkg,
                             "firstInstallTime" to pkgInfo.firstInstallTime,
                             "system" to ((appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0),
-                            "icon" to iconBytes,
                         )
                     )
-                } catch (_: PackageManager.NameNotFoundException) {
-                    // App vanished between query and lookup; skip it.
-                }
+                } catch (_: PackageManager.NameNotFoundException) {}
             }
+            // Prune stale icon cache after metadata is collected.
             pruneIconCache(seen)
             mainHandler.post { result.success(apps) }
         }.start()
     }
 
     /**
-     * Returns cached icon bytes for [pkg] at [versionCode], generating and
-     * storing them via [generate] on a cache miss. A corrupted cache file is
-     * treated as a miss and overwritten.
+     * Phase 2: loads icon bytes for [packages] in parallel using a thread pool
+     * sized to the number of CPU cores. Cache hits (file read) are ~10× faster
+     * than cache misses (drawable → bitmap → PNG encode → file write).
      */
-    private fun cachedIcon(
-        pkg: String,
-        versionCode: Long,
-        generate: () -> ByteArray,
-    ): ByteArray {
+    private fun loadIcons(packages: List<String>, result: MethodChannel.Result) {
+        Thread {
+            val pm = packageManager
+            val threads = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
+            val executor = Executors.newFixedThreadPool(threads)
+            val iconMap = ConcurrentHashMap<String, ByteArray>()
+
+            val futures = packages.map { pkg ->
+                executor.submit {
+                    try {
+                        val pkgInfo = pm.getPackageInfo(pkg, 0)
+                        @Suppress("DEPRECATION")
+                        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            pkgInfo.longVersionCode
+                        } else {
+                            pkgInfo.versionCode.toLong()
+                        }
+                        val bytes = cachedIcon(pkg, versionCode) {
+                            drawableToPng(pm.getApplicationIcon(pkg))
+                        }
+                        iconMap[pkg] = bytes
+                    } catch (_: Exception) {}
+                }
+            }
+            futures.forEach { it.get() }
+            executor.shutdown()
+
+            mainHandler.post { result.success(HashMap(iconMap)) }
+        }.start()
+    }
+
+    private fun cachedIcon(pkg: String, versionCode: Long, generate: () -> ByteArray): ByteArray {
         val file = iconCacheFile(pkg, versionCode)
         if (file.exists()) {
-            try { return file.readBytes() } catch (_: Exception) { /* corrupted — regenerate */ }
+            try { return file.readBytes() } catch (_: Exception) {}
         }
         val bytes = generate()
-        try { file.writeBytes(bytes) } catch (_: Exception) { /* disk full — skip cache */ }
+        try { file.writeBytes(bytes) } catch (_: Exception) {}
         return bytes
     }
 
-    /** Returns the cache file path for a given package + version pair. */
     private fun iconCacheFile(pkg: String, versionCode: Long): File {
         val dir = File(cacheDir, "icons").apply { mkdirs() }
         return File(dir, "${pkg}_$versionCode.png")
     }
 
-    /**
-     * Deletes cached icon files for packages no longer present on the device
-     * so the icon cache does not grow unboundedly.
-     */
     private fun pruneIconCache(currentPackages: Set<String>) {
         val iconDir = File(cacheDir, "icons")
         if (!iconDir.exists()) return
@@ -158,22 +174,16 @@ class MainActivity : FlutterActivity() {
         if (market.resolveActivity(packageManager) != null) {
             openIntent(market)
         } else {
-            openIntent(
-                Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
-            )
+            openIntent(Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://play.google.com/store/apps/details?id=$pkg")))
         }
     }
 
     private fun openIntent(intent: Intent) {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        try {
-            startActivity(intent)
-        } catch (_: Exception) {
-            // No activity available to handle the intent; ignore.
-        }
+        try { startActivity(intent) } catch (_: Exception) {}
     }
 
-    /** Renders a drawable into a fixed-size PNG byte array for Flutter. */
     private fun drawableToPng(drawable: Drawable): ByteArray {
         val bitmap = if (drawable is BitmapDrawable && drawable.bitmap != null) {
             Bitmap.createScaledBitmap(drawable.bitmap, iconSize, iconSize, true)
@@ -184,8 +194,8 @@ class MainActivity : FlutterActivity() {
             drawable.draw(canvas)
             bmp
         }
-        val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-        return stream.toByteArray()
+        return ByteArrayOutputStream().also {
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+        }.toByteArray()
     }
 }

@@ -1,7 +1,23 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../models/app_entry.dart';
 import '../services/app_service.dart';
+
+Widget _iconWidget(Uint8List? icon, double size) {
+  if (icon != null) return Image.memory(icon, width: size, height: size);
+  return SizedBox(
+    width: size,
+    height: size,
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.white10,
+        borderRadius: BorderRadius.circular(size * 0.22),
+      ),
+    ),
+  );
+}
 
 /// Font size of the app name in a grid tile.
 const double _kNameFontSize = 12;
@@ -14,13 +30,18 @@ const double _kNameLineHeight = 1.1;
 /// row keeps its icon at the same height.
 const double _kNameHeight = _kNameFontSize * _kNameLineHeight * 2;
 
-/// A single grid cell: app icon above its name, with a 'new' badge for
-/// recently installed apps.
+/// A single grid cell: app icon above its name, with optional badges.
 class AppTile extends StatelessWidget {
-  const AppTile({super.key, required this.app, required this.onTap});
+  const AppTile({
+    super.key,
+    required this.app,
+    required this.onTap,
+    this.showDayBadge = false,
+  });
 
   final AppEntry app;
   final VoidCallback onTap;
+  final bool showDayBadge;
 
   @override
   Widget build(BuildContext context) {
@@ -36,27 +57,18 @@ class AppTile extends StatelessWidget {
             Stack(
               clipBehavior: Clip.none,
               children: [
-                Image.memory(app.icon, width: 52, height: 52),
+                _iconWidget(app.icon, 52),
                 if (app.isNew)
                   Positioned(
                     top: -4,
                     right: -6,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 5, vertical: 1),
-                      decoration: BoxDecoration(
-                        color: Colors.greenAccent.shade400,
-                        borderRadius: BorderRadius.circular(7),
-                      ),
-                      child: const Text(
-                        'new',
-                        style: TextStyle(
-                          color: Colors.black,
-                          fontSize: 9,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
+                    child: _badge('new', Colors.greenAccent.shade400),
+                  )
+                else if (showDayBadge)
+                  Positioned(
+                    top: -4,
+                    right: -6,
+                    child: _badge('day', Colors.amber.shade400),
                   ),
               ],
             ),
@@ -81,6 +93,22 @@ class AppTile extends StatelessWidget {
   }
 }
 
+Widget _badge(String text, Color color) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: Colors.black,
+          fontSize: 9,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+
 /// Shows the long-press action popup: Delete, App info, Play Store.
 /// Delete is disabled for system apps, which cannot be uninstalled.
 Future<void> showAppActions(BuildContext context, AppEntry app) {
@@ -95,7 +123,7 @@ Future<void> showAppActions(BuildContext context, AppEntry app) {
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
               child: Row(
                 children: [
-                  Image.memory(app.icon, width: 36, height: 36),
+                  _iconWidget(app.icon, 36),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(

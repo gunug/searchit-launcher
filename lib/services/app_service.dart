@@ -2,16 +2,15 @@ import 'package:flutter/services.dart';
 
 import '../models/app_entry.dart';
 
-/// Bridges the Flutter launcher to the native [MethodChannel] that knows how
-/// to enumerate, launch and manage installed apps.
 class AppService {
   AppService._();
 
   static const _channel = MethodChannel('searchit/apps');
 
-  /// Loads every launchable app on the device (system apps included).
-  static Future<List<AppEntry>> getApps() async {
-    final raw = await _channel.invokeMethod<List<dynamic>>('getApps') ?? [];
+  /// Phase 1: app metadata only (no icons) — very fast.
+  static Future<List<AppEntry>> getAppsMetadata() async {
+    final raw =
+        await _channel.invokeMethod<List<dynamic>>('getAppsMetadata') ?? [];
     final apps = raw
         .map((e) => AppEntry.fromMap(e as Map<dynamic, dynamic>))
         .toList();
@@ -19,30 +18,34 @@ class AppService {
     return apps;
   }
 
-  /// Launches [packageName]; returns false when no launch intent exists.
+  /// Phase 2: icon bytes for [packages], loaded in parallel on the native side.
+  /// Returns a map of packageName → PNG bytes.
+  static Future<Map<String, Uint8List>> getIcons(
+      List<String> packages) async {
+    if (packages.isEmpty) return {};
+    final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+          'getIcons',
+          {'packages': packages},
+        ) ??
+        {};
+    return raw.map((k, v) => MapEntry(k as String, v as Uint8List));
+  }
+
   static Future<bool> launch(String packageName) async {
     final ok = await _channel
         .invokeMethod<bool>('launchApp', {'package': packageName});
     return ok ?? false;
   }
 
-  /// Fires the system uninstall dialog for [packageName].
-  static Future<void> uninstall(String packageName) {
-    return _channel.invokeMethod('uninstallApp', {'package': packageName});
-  }
+  static Future<void> uninstall(String packageName) =>
+      _channel.invokeMethod('uninstallApp', {'package': packageName});
 
-  /// Opens the system "App info" screen for [packageName].
-  static Future<void> openAppInfo(String packageName) {
-    return _channel.invokeMethod('openAppInfo', {'package': packageName});
-  }
+  static Future<void> openAppInfo(String packageName) =>
+      _channel.invokeMethod('openAppInfo', {'package': packageName});
 
-  /// Opens the Play Store page for [packageName].
-  static Future<void> openPlayStore(String packageName) {
-    return _channel.invokeMethod('openPlayStore', {'package': packageName});
-  }
+  static Future<void> openPlayStore(String packageName) =>
+      _channel.invokeMethod('openPlayStore', {'package': packageName});
 
-  /// Opens the Android system "Default apps → Home app" settings screen.
-  static Future<void> openHomeSettings() {
-    return _channel.invokeMethod('openHomeSettings');
-  }
+  static Future<void> openHomeSettings() =>
+      _channel.invokeMethod('openHomeSettings');
 }
