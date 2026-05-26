@@ -40,4 +40,9 @@ class AppService {
   static Future<void> openPlayStore(String packageName) {
     return _channel.invokeMethod('openPlayStore', {'package': packageName});
   }
+
+  /// Opens the Android system "Default apps → Home app" settings screen.
+  static Future<void> openHomeSettings() {
+    return _channel.invokeMethod('openHomeSettings');
+  }
 }

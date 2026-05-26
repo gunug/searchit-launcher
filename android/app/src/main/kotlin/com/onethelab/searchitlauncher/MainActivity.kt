@@ -8,13 +8,16 @@ import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.provider.Settings.ACTION_HOME_SETTINGS
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
+import java.io.File
 
 /**
  * Hosts the platform channel that lets the Flutter launcher query, launch and
@@ -23,7 +26,7 @@ import java.io.ByteArrayOutputStream
 class MainActivity : FlutterActivity() {
 
     private val channelName = "searchit/apps"
-    private val iconSize = 128
+    private val iconSize = 72   // 52px display size; 72px gives ~1.4× margin for density
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -52,6 +55,10 @@ class MainActivity : FlutterActivity() {
                         openPlayStore(call.argument<String>("package"))
                         result.success(null)
                     }
+                    "openHomeSettings" -> {
+                        openIntent(Intent(ACTION_HOME_SETTINGS))
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -72,21 +79,69 @@ class MainActivity : FlutterActivity() {
                 try {
                     val appInfo = pm.getApplicationInfo(pkg, 0)
                     val pkgInfo = pm.getPackageInfo(pkg, 0)
+                    @Suppress("DEPRECATION")
+                    val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        pkgInfo.longVersionCode
+                    } else {
+                        pkgInfo.versionCode.toLong()
+                    }
+                    val iconBytes = cachedIcon(pkg, versionCode) {
+                        drawableToPng(info.loadIcon(pm))
+                    }
                     apps.add(
                         mapOf(
                             "label" to info.loadLabel(pm).toString(),
                             "package" to pkg,
                             "firstInstallTime" to pkgInfo.firstInstallTime,
                             "system" to ((appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0),
-                            "icon" to drawableToPng(info.loadIcon(pm)),
+                            "icon" to iconBytes,
                         )
                     )
                 } catch (_: PackageManager.NameNotFoundException) {
                     // App vanished between query and lookup; skip it.
                 }
             }
+            pruneIconCache(seen)
             mainHandler.post { result.success(apps) }
         }.start()
+    }
+
+    /**
+     * Returns cached icon bytes for [pkg] at [versionCode], generating and
+     * storing them via [generate] on a cache miss. A corrupted cache file is
+     * treated as a miss and overwritten.
+     */
+    private fun cachedIcon(
+        pkg: String,
+        versionCode: Long,
+        generate: () -> ByteArray,
+    ): ByteArray {
+        val file = iconCacheFile(pkg, versionCode)
+        if (file.exists()) {
+            try { return file.readBytes() } catch (_: Exception) { /* corrupted — regenerate */ }
+        }
+        val bytes = generate()
+        try { file.writeBytes(bytes) } catch (_: Exception) { /* disk full — skip cache */ }
+        return bytes
+    }
+
+    /** Returns the cache file path for a given package + version pair. */
+    private fun iconCacheFile(pkg: String, versionCode: Long): File {
+        val dir = File(cacheDir, "icons").apply { mkdirs() }
+        return File(dir, "${pkg}_$versionCode.png")
+    }
+
+    /**
+     * Deletes cached icon files for packages no longer present on the device
+     * so the icon cache does not grow unboundedly.
+     */
+    private fun pruneIconCache(currentPackages: Set<String>) {
+        val iconDir = File(cacheDir, "icons")
+        if (!iconDir.exists()) return
+        iconDir.listFiles()?.forEach { file ->
+            val pkg = file.name.substringBeforeLast('_')
+            if (pkg !in currentPackages) file.delete()
+        }
     }
 
     private fun launchApp(pkg: String?): Boolean {

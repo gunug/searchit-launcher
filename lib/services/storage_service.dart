@@ -21,8 +21,8 @@ class HistoryEntry {
       );
 }
 
-/// Persists the (permanent) search history and the recent-app list.
-/// Recents only track apps launched through this launcher — no system
+/// Persists the search history, recent-app list, and per-app launch timestamps.
+/// All data is recorded only for launches through this launcher — no system
 /// usage-stats permission is required.
 class StorageService {
   StorageService._();
@@ -30,6 +30,9 @@ class StorageService {
   static const _historyKey = 'search_history';
   static const _recentKey = 'recent_apps';
   static const _recentLimit = 30;
+  static const _launchHistoryKey = 'launch_history_v2';
+  static const _launchRetentionDays = 30;
+  static const _dayBadgeEarnedKey = 'day_badge_earned';
 
   static SharedPreferences? _prefs;
 
@@ -93,6 +96,45 @@ class StorageService {
       recents.removeRange(_recentLimit, recents.length);
     }
     await (await _store).setStringList(_recentKey, recents);
+  }
+
+  // --- Launch history (for badge calculation) ----------------------------------
+
+  /// Returns a map of packageName → list of launch timestamps (ms since epoch).
+  static Future<Map<String, List<int>>> loadLaunchHistory() async {
+    final raw = (await _store).getString(_launchHistoryKey);
+    if (raw == null || raw.isEmpty) return {};
+    final map = jsonDecode(raw) as Map<String, dynamic>;
+    return map.map((k, v) => MapEntry(k, (v as List).cast<int>()));
+  }
+
+  // --- Day badge earned set -------------------------------------------------
+
+  static Future<Set<String>> loadDayBadgeEarned() async {
+    return ((await _store).getStringList(_dayBadgeEarnedKey) ?? []).toSet();
+  }
+
+  static Future<void> saveDayBadgeEarned(Set<String> earned) async {
+    await (await _store)
+        .setStringList(_dayBadgeEarnedKey, earned.toList());
+  }
+
+  /// Appends the current timestamp for [packageName] and prunes entries older
+  /// than [_launchRetentionDays] so storage does not grow unboundedly.
+  static Future<void> recordLaunchTimestamp(String packageName) async {
+    final history = await loadLaunchHistory();
+    final now = DateTime.now();
+    final cutoff = now
+        .subtract(const Duration(days: _launchRetentionDays))
+        .millisecondsSinceEpoch;
+    final launches = (history[packageName] ?? [])
+      ..removeWhere((ts) => ts < cutoff)
+      ..add(now.millisecondsSinceEpoch);
+    history[packageName] = launches;
+    await (await _store).setString(
+      _launchHistoryKey,
+      jsonEncode(history),
+    );
   }
 }
 

@@ -2,176 +2,311 @@ import '../models/app_entry.dart';
 import '../services/storage_service.dart';
 import 'korean.dart';
 
-/// The four classified result sections, in display order.
-class SearchResults {
-  SearchResults({
-    this.match = const [],
-    this.history = const [],
-    this.similar = const [],
-    this.related = const [],
-  });
-
-  final List<AppEntry> match;
-  final List<AppEntry> history;
-  final List<AppEntry> similar;
-  final List<AppEntry> related;
-
-  bool get isEmpty =>
-      match.isEmpty && history.isEmpty && similar.isEmpty && related.isEmpty;
-}
-
 class _Scored {
   _Scored(this.app, this.score);
   final AppEntry app;
   final double score;
 }
 
-/// Classifies apps into match / history / similar / related for a query.
+/// Returns apps ranked by relevance for [rawQuery].
 ///
-/// Each app appears in only the highest-ranking section it qualifies for,
-/// and apps inside a section are ordered by relevance (일치도순).
+/// 11-tier priority (docs/ranking.md):
+///   1.  exact, case+space sensitive          → 11000
+///   2.  exact, case-insensitive, space-kept  → 10000
+///   3.  exact, normalized (case+space strip) → 9000
+///   4.  startsWith                           → 8000–8100
+///   5.  word-boundary contains               → 7000–7100
+///   6.  contains                             → 6000–6100
+///   7.  초성                                 → 5000
+///   8.  history (recency-weighted)           → 4000–4999
+///   9.  QWERTY / 자판오타                    → 3000–3999
+///  10.  phonetic / roman / initials          → 2000–2999
+///  11.  LCS / overlap / subsequence          → 1000–1999
 class SearchEngine {
   SearchEngine._();
 
-  static SearchResults search(
+  static List<AppEntry> search(
     String rawQuery,
     List<AppEntry> apps,
     List<HistoryEntry> history,
   ) {
     final query = rawQuery.trim();
-    if (query.isEmpty) return SearchResults();
+    if (query.isEmpty) return const [];
 
     final q = Korean.normalize(query);
     final qRoman = Korean.romanize(query);
     final qQwerty = Korean.qwerty(query);
     final qPhonetic = Korean.phoneticKey(query);
     final chosungQuery = Korean.isChosungOnly(query);
-    final used = <String>{};
 
-    // 1. match — query is contained in the app name or package name,
-    //    plus Korean 초성 search against the app name.
-    final matchScored = <_Scored>[];
-    for (final app in apps) {
-      final label = app.labelNorm;
-      final pkg = app.packageNorm;
-      double score = 0;
-      if (label == q) {
-        score = 5;
-      } else if (label.startsWith(q)) {
-        score = 4;
-      } else if (label.contains(q)) {
-        score = 3;
-      } else if (pkg.contains(q)) {
-        score = 2;
-      }
-      if (score == 0 && chosungQuery && app.chosung.contains(query)) {
-        score = 1;
-      }
-      if (score > 0) matchScored.add(_Scored(app, score));
-    }
-    final match = _take(matchScored, used);
-
-    // 2. history — the query partially matches a past keyword whose apps
-    //    were launched from the similar/related sections.
-    final histScore = <String, double>{};
+    // Precompute history: package → most recent timestamp for matching keywords.
+    final histTs = <String, double>{};
     for (final entry in history) {
       if (!_keywordMatches(query, q, chosungQuery, entry.keyword)) continue;
       for (final pkg in entry.packages) {
         final ts = entry.updatedAt.toDouble();
-        if (ts > (histScore[pkg] ?? 0)) histScore[pkg] = ts;
+        if (ts > (histTs[pkg] ?? 0)) histTs[pkg] = ts;
       }
     }
-    final historyScored = <_Scored>[];
+    final maxTs = histTs.values.fold(0.0, (m, v) => v > m ? v : m);
+
+    final scored = <_Scored>[];
     for (final app in apps) {
-      final ts = histScore[app.packageName];
-      if (ts != null) historyScored.add(_Scored(app, ts));
+      final score = _score(
+          app, query, q, qRoman, qQwerty, qPhonetic, chosungQuery, histTs, maxTs);
+      if (score > 0) scored.add(_Scored(app, score));
     }
-    final historyList = _take(historyScored, used);
 
-    // 3. similar — the query is not literally in the name but sounds or
-    //    types like it. Three signals, each scored on a 0..~1 scale:
-    //      a) substring of a normalized / romanized / QWERTY-layout form,
-    //         so wrong-IME typing ("zkzkdh" → 카카오) is recovered here;
-    //      b) fuzzy match on the phonetic skeleton, so English spelling and
-    //         Korean transcription line up despite the epenthetic 으 and
-    //         missing f/v/z sounds;
-    //      c) initials match, so "gp" finds "Google Play".
-    final queryForms = {q, qRoman, qQwerty}..removeWhere((e) => e.isEmpty);
-    final similarScored = <_Scored>[];
-    for (final app in apps) {
-      if (used.contains(app.packageName)) continue;
-      final appForms = {app.labelNorm, app.roman, app.qwerty}
-        ..removeWhere((e) => e.isEmpty);
-      double best = 0;
-      // 3a. substring across forms; a hit at a word boundary scores higher.
-      for (final qf in queryForms) {
-        for (final af in appForms) {
-          final at = af.indexOf(qf);
-          if (at < 0) continue;
-          final score = qf.length / af.length + _wordBoundaryBonus(af, at);
-          if (score > best) best = score;
-        }
-      }
-      // 3b. fuzzy phonetic-skeleton match.
-      if (qPhonetic.length >= 3 && app.phonetic.length >= 2) {
-        final dist = _fuzzySubstringDistance(qPhonetic, app.phonetic);
-        final allowed = (qPhonetic.length ~/ 3).clamp(1, 99);
-        if (dist <= allowed) {
-          // Kept just below 1.0 so exact substring hits still rank first.
-          final fuzzy = 0.9 * (1 - dist / qPhonetic.length);
-          if (fuzzy > best) best = fuzzy;
-        }
-      }
-      // 3c. initials / abbreviation match (English app names only).
-      if (q.length >= 2 && app.initials.length >= 2) {
-        final at = app.initials.indexOf(q);
-        if (at >= 0) {
-          final score = (0.85 - at * 0.05).clamp(0.0, 1.0);
-          if (score > best) best = score;
-        }
-      }
-      if (best > 0) similarScored.add(_Scored(app, best));
-    }
-    final similar = _take(similarScored, used);
+    scored.sort((a, b) {
+      final c = b.score.compareTo(a.score);
+      return c != 0
+          ? c
+          : a.app.label.toLowerCase().compareTo(b.app.label.toLowerCase());
+    });
 
-    // 4. related — loose character-overlap / subsequence match; only shown
-    //    for 2+ char queries. Subsequence catches names where every query
-    //    character appears in order with gaps (e.g. "ggl" → "google"); a
-    //    tighter spread of those characters scores higher.
-    final relatedScored = <_Scored>[];
-    if (query.length >= 2) {
-      final relQuery = chosungQuery ? query : q;
-      for (final app in apps) {
-        if (used.contains(app.packageName)) continue;
-        final target = chosungQuery
-            ? app.chosung
-            : '${app.labelNorm}${app.packageNorm}';
-        final lcs = _longestCommonSubstring(relQuery, target);
-        final overlap = _charOverlap(relQuery, target);
-        var score = (lcs * 10 + overlap).toDouble();
-        if (!chosungQuery &&
-            qRoman.length >= 3 &&
-            _isSubsequence(qRoman, app.roman)) {
-          final spread = _subsequenceSpread(qRoman, app.roman);
-          final tightness =
-              ((qRoman.length - 1) / (spread + 1)).clamp(0.0, 1.0);
-          score += 15 + tightness * 10;
-        }
-        if (score <= 0) continue;
-        relatedScored.add(_Scored(app, score));
-      }
-    }
-    final related = _take(relatedScored, used);
-
-    return SearchResults(
-      match: match,
-      history: historyList,
-      similar: similar,
-      related: related,
-    );
+    return scored.map((s) => s.app).toList();
   }
 
-  /// Applies the same match logic to a stored history [keyword].
+  static double _score(
+    AppEntry app,
+    String rawQuery,
+    String q,
+    String qRoman,
+    String qQwerty,
+    String qPhonetic,
+    bool chosungQuery,
+    Map<String, double> histTs,
+    double maxTs,
+  ) {
+    final label = app.labelNorm;
+    final pkg = app.packageNorm;
+
+    // Tier 1: exact, case+space sensitive
+    if (app.label == rawQuery) return 11000;
+
+    // Tier 2: exact, case-insensitive, space-sensitive
+    if (app.label.toLowerCase() == rawQuery.toLowerCase()) return 10000;
+
+    // Tier 3: exact, normalized (case+space insensitive)
+    if (label == q || pkg == q) return 9000;
+
+    // Tier 4: startsWith
+    double startRatio = 0;
+    if (label.startsWith(q)) startRatio = q.length / label.length;
+    if (pkg.startsWith(q)) {
+      final r = q.length / pkg.length;
+      if (r > startRatio) startRatio = r;
+    }
+    if (startRatio > 0) return 8000 + startRatio * 100;
+
+    // Tier 5: word-boundary contains (position > 0, so startsWith excluded)
+    final wbLabel = _wordBoundaryRatio(label, q);
+    final wbPkg = _wordBoundaryRatio(pkg, q);
+    final wbRatio = wbLabel > wbPkg ? wbLabel : wbPkg;
+    if (wbRatio > 0) return 7000 + wbRatio * 100;
+
+    // Tier 6: contains
+    double contRatio = 0;
+    if (label.contains(q)) contRatio = q.length / label.length;
+    if (pkg.contains(q)) {
+      final r = q.length / pkg.length;
+      if (r > contRatio) contRatio = r;
+    }
+    if (contRatio > 0) return 6000 + contRatio * 100;
+
+    // Tier 7: 초성
+    if (chosungQuery && app.chosung.contains(rawQuery)) return 5000;
+
+    // Tier 8: history
+    if (maxTs > 0) {
+      final ts = histTs[app.packageName];
+      if (ts != null) return 4000 + (ts / maxTs) * 999;
+    }
+
+    // Tier 9: QWERTY / 자판오타
+    final qwertyScore = _qwertyScore(app, q, qQwerty);
+    if (qwertyScore > 0) return 3000 + qwertyScore * 999;
+
+    // Tier 10: phonetic / roman / initials
+    final phoneticScore = _phoneticScore(app, q, qRoman, qPhonetic);
+    if (phoneticScore > 0) return 2000 + phoneticScore * 999;
+
+    // Tier 11: LCS / overlap / subsequence (2+ char queries)
+    if (rawQuery.length >= 2) {
+      final relScore = _relatedScore(app, rawQuery, q, qRoman, chosungQuery);
+      if (relScore > 0) return 1000 + (relScore * 5).clamp(0, 999);
+    }
+
+    // Roman fallback: Korean query → romanize → re-score as plain English query.
+    // This gives Korean input the same Tier 3–11 coverage English input gets,
+    // since most app labels are Latin and Korean chars never match them directly.
+    if (qRoman.isNotEmpty && qRoman != q) {
+      return _scoreRoman(app, qRoman);
+    }
+
+    return 0;
+  }
+
+  // --- Tier helpers ---
+
+  /// Ratio of [query] length to [text] length when [query] appears in [text]
+  /// starting at a word boundary (position > 0). Returns 0 if no such match.
+  static double _wordBoundaryRatio(String text, String query) {
+    if (query.isEmpty) return 0;
+    var pos = text.indexOf(query, 1); // skip pos 0 — that's startsWith (tier 4)
+    while (pos > 0) {
+      final prev = text[pos - 1];
+      if (prev == ' ' || prev == '-' || prev == '_' || prev == '.') {
+        return query.length / text.length;
+      }
+      pos = text.indexOf(query, pos + 1);
+    }
+    return 0;
+  }
+
+  /// Tier 9: query matches via QWERTY keyboard layout cross-mapping.
+  static double _qwertyScore(AppEntry app, String q, String qQwerty) {
+    double best = 0;
+
+    // User typed QWERTY keys that correspond to a Korean label.
+    if (q.isNotEmpty && app.qwerty.isNotEmpty) {
+      if (app.qwerty == q) {
+        best = 1.0;
+      } else if (app.qwerty.startsWith(q)) {
+        final r = 0.9 + (q.length / app.qwerty.length) * 0.09;
+        if (r > best) best = r;
+      } else if (app.qwerty.contains(q)) {
+        final r = q.length / app.qwerty.length;
+        if (r > best) best = r;
+      }
+    }
+
+    // QWERTY projection of query matches label / roman / qwerty forms.
+    if (qQwerty.isNotEmpty) {
+      for (final af in [app.labelNorm, app.roman, app.qwerty]) {
+        if (af.isEmpty) continue;
+        if (af == qQwerty) {
+          best = 1.0;
+          break;
+        } else if (af.startsWith(qQwerty)) {
+          final r = 0.9 + (qQwerty.length / af.length) * 0.09;
+          if (r > best) best = r;
+        } else if (af.contains(qQwerty)) {
+          final r = qQwerty.length / af.length;
+          if (r > best) best = r;
+        }
+      }
+    }
+
+    return best;
+  }
+
+  /// Tier 10: romanized / phonetic / initials match.
+  static double _phoneticScore(
+      AppEntry app, String q, String qRoman, String qPhonetic) {
+    double best = 0;
+
+    // Romanized query vs label / roman forms.
+    if (qRoman.isNotEmpty) {
+      for (final af in [app.labelNorm, app.roman]) {
+        if (af.isEmpty) continue;
+        final at = af.indexOf(qRoman);
+        if (at < 0) continue;
+        final score = qRoman.length / af.length + _wordBoundaryBonus(af, at);
+        if (score > best) best = score;
+      }
+    }
+
+    // Fuzzy phonetic skeleton (consonant-skeleton edit distance).
+    if (qPhonetic.length >= 3 && app.phonetic.length >= 2) {
+      final dist = _fuzzySubstringDistance(qPhonetic, app.phonetic);
+      final allowed = (qPhonetic.length ~/ 3).clamp(1, 99);
+      if (dist <= allowed) {
+        final fuzzy = 0.9 * (1 - dist / qPhonetic.length);
+        if (fuzzy > best) best = fuzzy;
+      }
+    }
+
+    // Initials / abbreviation (e.g. "gp" → "Google Play").
+    if (q.length >= 2 && app.initials.length >= 2) {
+      final at = app.initials.indexOf(q);
+      if (at >= 0) {
+        final score = (0.85 - at * 0.05).clamp(0.0, 1.0);
+        if (score > best) best = score;
+      }
+    }
+
+    return best;
+  }
+
+  static double _relatedScore(
+    AppEntry app,
+    String rawQuery,
+    String q,
+    String qRoman,
+    bool chosungQuery,
+  ) {
+    final relQuery = chosungQuery ? rawQuery : q;
+    final target = chosungQuery
+        ? app.chosung
+        : '${app.labelNorm}${app.packageNorm}';
+    final lcs = _longestCommonSubstring(relQuery, target);
+    final overlap = _charOverlap(relQuery, target);
+    var score = (lcs * 10 + overlap).toDouble();
+
+    if (!chosungQuery &&
+        qRoman.length >= 3 &&
+        _isSubsequence(qRoman, app.roman)) {
+      final spread = _subsequenceSpread(qRoman, app.roman);
+      final tightness =
+          ((qRoman.length - 1) / (spread + 1)).clamp(0.0, 1.0);
+      score += 15 + tightness * 10;
+    }
+
+    return score;
+  }
+
+  /// Scores [app] by treating [romanQuery] (the romanized Korean query) as a
+  /// plain English query — mirrors Tiers 3–6 and 11 against Latin app labels.
+  static double _scoreRoman(AppEntry app, String romanQuery) {
+    if (romanQuery.isEmpty) return 0;
+    final label = app.labelNorm;
+    final pkg = app.packageNorm;
+
+    if (label == romanQuery || pkg == romanQuery) return 9000;
+
+    double startRatio = 0;
+    if (label.startsWith(romanQuery)) startRatio = romanQuery.length / label.length;
+    if (pkg.startsWith(romanQuery)) {
+      final r = romanQuery.length / pkg.length;
+      if (r > startRatio) startRatio = r;
+    }
+    if (startRatio > 0) return 8000 + startRatio * 100;
+
+    final wbLabel = _wordBoundaryRatio(label, romanQuery);
+    final wbPkg = _wordBoundaryRatio(pkg, romanQuery);
+    final wbRatio = wbLabel > wbPkg ? wbLabel : wbPkg;
+    if (wbRatio > 0) return 7000 + wbRatio * 100;
+
+    double contRatio = 0;
+    if (label.contains(romanQuery)) contRatio = romanQuery.length / label.length;
+    if (pkg.contains(romanQuery)) {
+      final r = romanQuery.length / pkg.length;
+      if (r > contRatio) contRatio = r;
+    }
+    if (contRatio > 0) return 6000 + contRatio * 100;
+
+    if (romanQuery.length >= 2) {
+      final target = '$label$pkg';
+      final lcs = _longestCommonSubstring(romanQuery, target);
+      final overlap = _charOverlap(romanQuery, target);
+      final relScore = (lcs * 10 + overlap).toDouble();
+      if (relScore > 0) return 1000 + (relScore * 5).clamp(0, 999);
+    }
+
+    return 0;
+  }
+
   static bool _keywordMatches(
       String query, String q, bool chosungQuery, String keyword) {
     if (Korean.normalize(keyword).contains(q)) return true;
@@ -179,22 +314,8 @@ class SearchEngine {
     return false;
   }
 
-  /// Sorts by relevance desc (label asc on ties) and drops apps already
-  /// placed in a higher section.
-  static List<AppEntry> _take(List<_Scored> scored, Set<String> used) {
-    scored.sort((a, b) {
-      final c = b.score.compareTo(a.score);
-      if (c != 0) return c;
-      return a.app.label.toLowerCase().compareTo(b.app.label.toLowerCase());
-    });
-    final out = <AppEntry>[];
-    for (final s in scored) {
-      if (used.add(s.app.packageName)) out.add(s.app);
-    }
-    return out;
-  }
+  // --- Low-level helpers ---
 
-  /// Length of the longest run of characters shared by [a] and [b].
   static int _longestCommonSubstring(String a, String b) {
     if (a.isEmpty || b.isEmpty) return 0;
     final ar = a.runes.toList();
@@ -214,15 +335,12 @@ class SearchEngine {
     return best;
   }
 
-  /// Minimum edit distance to align [pattern] against any substring of
-  /// [text]. Used for fuzzy phonetic-skeleton matching in the similar
-  /// section: free start/end offsets, edits counted only within the window.
   static int _fuzzySubstringDistance(String pattern, String text) {
     final m = pattern.length;
     final n = text.length;
     if (m == 0) return 0;
     if (n == 0) return m;
-    var prev = List<int>.filled(n + 1, 0); // row 0 = 0: any start offset free
+    var prev = List<int>.filled(n + 1, 0);
     for (var i = 1; i <= m; i++) {
       final cur = List<int>.filled(n + 1, 0);
       cur[0] = i;
@@ -235,10 +353,9 @@ class SearchEngine {
       }
       prev = cur;
     }
-    return prev.reduce((a, b) => a < b ? a : b); // best end offset
+    return prev.reduce((a, b) => a < b ? a : b);
   }
 
-  /// Count of [a]'s characters that also appear in [b] (multiset overlap).
   static int _charOverlap(String a, String b) {
     final counts = <int, int>{};
     for (final r in b.runes) {
@@ -255,9 +372,6 @@ class SearchEngine {
     return n;
   }
 
-  /// Ranking bonus when a substring match starts at a word boundary, so a
-  /// hit on a word's first letter outranks one buried mid-word. Returns 0
-  /// when [pos] is inside a word.
   static double _wordBoundaryBonus(String haystack, int pos) {
     if (pos == 0) return 0.10;
     if (pos < 0 || pos >= haystack.length) return 0;
@@ -266,8 +380,6 @@ class SearchEngine {
     return 0;
   }
 
-  /// True when every character of [pattern] appears in [text] in order,
-  /// gaps allowed (e.g. "ggl" is a subsequence of "google").
   static bool _isSubsequence(String pattern, String text) {
     if (pattern.isEmpty) return true;
     var i = 0;
@@ -277,10 +389,6 @@ class SearchEngine {
     return i == pattern.length;
   }
 
-  /// Index span between the first and last matched character of a
-  /// subsequence alignment of [pattern] in [text] — smaller means the
-  /// matched characters sit closer together. Returns [text].length when
-  /// [pattern] is not a subsequence of [text].
   static int _subsequenceSpread(String pattern, String text) {
     if (pattern.isEmpty) return 0;
     var first = -1;
