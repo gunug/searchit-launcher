@@ -4,11 +4,12 @@ import '../models/app_entry.dart';
 import '../models/badge.dart';
 import '../search/search_engine.dart';
 import '../services/app_service.dart';
+import '../services/donation_service.dart';
 import '../services/storage_service.dart';
 import 'app_tile.dart';
 
 /// 두 페이지로 구성된 런처 홈.
-/// 왼쪽(0): 빈도순 전체 앱 그리드
+/// 왼쪽(0): 빈도순 전체 앱 그리드 (사용/미사용 섹션 분리)
 /// 오른쪽(1): 검색창 + 최근 사용
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -18,11 +19,9 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  static const int _crossAxisCount = 4;
-
-  static const _gridDelegate = SliverGridDelegateWithFixedCrossAxisCount(
-    crossAxisCount: _crossAxisCount,
-    childAspectRatio: 0.78,
+  static const _gridDelegate = SliverGridDelegateWithMaxCrossAxisExtent(
+    maxCrossAxisExtent: 90,
+    mainAxisExtent: 100,
   );
 
   final _searchController = TextEditingController();
@@ -34,6 +33,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<String> _recents = [];
   Map<String, List<DateTime>> _launchHistory = {};
   Set<String> _dayBadgeEarned = {};
+  Set<String> _newBadgeDismissed = {};
+  Set<String> _lockedApps = {};
 
   String _query = '';
   bool _loading = true;
@@ -43,6 +44,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _load();
+    DonationService.init();
+    DonationService.setOnResult((success) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(success
+            ? '후원 감사합니다! / Thank you for your support!'
+            : '결제에 실패했습니다 / Purchase failed'),
+      ));
+    });
   }
 
   @override
@@ -50,6 +60,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _searchController.dispose();
     _pageController.dispose();
+    DonationService.dispose();
     super.dispose();
   }
 
@@ -59,12 +70,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _load() async {
+    // 30일 미사용 앱 기록 자동 정리 (SharedPreferences 첫 초기화도 여기서 수행)
+    await StorageService.pruneStaleRecords();
+
     // 모든 storage 읽기 + native 메타데이터 쿼리를 동시에 시작
     final cachedAppsF = StorageService.loadCachedApps();
     final historyF = StorageService.loadHistory();
     final recentsF = StorageService.loadRecents();
     final rawHistoryF = StorageService.loadLaunchHistory();
     final dayBadgeF = StorageService.loadDayBadgeEarned();
+    final newBadgeDismissedF = StorageService.loadNewBadgeDismissed();
+    final lockedAppsF = StorageService.loadLockedApps();
     final metadataF = AppService.getAppsMetadata();
 
     // storage는 native보다 빠르게 완료됨
@@ -73,6 +89,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final recents = await recentsF;
     final rawHistory = await rawHistoryF;
     var dayBadgeEarned = await dayBadgeF;
+    final newBadgeDismissed = await newBadgeDismissedF;
+    final lockedApps = await lockedAppsF;
 
     final launchHistory = rawHistory.map(
       (k, v) => MapEntry(
@@ -89,6 +107,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _history = history;
         _recents = recents;
         _launchHistory = launchHistory;
+        _dayBadgeEarned = dayBadgeEarned;
+        _newBadgeDismissed = newBadgeDismissed;
+        _lockedApps = lockedApps;
         _loading = false;
       });
     }
@@ -128,6 +149,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _recents = recents;
       _launchHistory = launchHistory;
       _dayBadgeEarned = dayBadgeEarned;
+      _newBadgeDismissed = newBadgeDismissed;
+      _lockedApps = lockedApps;
       _loading = false;
     });
 
@@ -166,8 +189,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     await AppService.launch(app.packageName);
   }
 
+  Future<void> _clearRecord(String packageName) async {
+    await StorageService.clearAppRecord(packageName);
+    await _load();
+  }
+
+  Future<void> _toggleLock(String packageName) async {
+    final updated = Set<String>.from(_lockedApps);
+    if (updated.contains(packageName)) {
+      updated.remove(packageName);
+    } else {
+      updated.add(packageName);
+    }
+    await StorageService.saveLockedApps(updated);
+    setState(() => _lockedApps = updated);
+  }
+
+  bool _showNewBadge(AppEntry app) =>
+      app.isNew && !_newBadgeDismissed.contains(app.packageName);
+
   // ---------------------------------------------------------------------------
-  // 빈도 정렬: new 배지 앱 최우선 → Σ 1/(1+경과일) → 라벨순
+  // 빈도 정렬: new 배지 앱 최우선 → day 배지 → Σ 1/(1+경과일) → 라벨순
   // ---------------------------------------------------------------------------
 
   List<AppEntry> _frequentAppsSorted() {
@@ -184,8 +226,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return (app, score);
     }).toList()
       ..sort((a, b) {
-        // 1순위: new 배지
-        final newCmp = (b.$1.isNew ? 1 : 0).compareTo(a.$1.isNew ? 1 : 0);
+        // 1순위: new 배지 (dismissed 제외)
+        final newCmp = (_showNewBadge(b.$1) ? 1 : 0).compareTo(_showNewBadge(a.$1) ? 1 : 0);
         if (newCmp != 0) return newCmp;
         // 2순위: day 배지
         final dayCmp = (_dayBadgeEarned.contains(b.$1.packageName) ? 1 : 0)
@@ -198,6 +240,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       });
 
     return scored.map((e) => e.$1).toList();
+  }
+
+  (List<AppEntry>, List<AppEntry>, List<AppEntry>) _splitApps() {
+    final sorted = _frequentAppsSorted();
+    final newAndLocked = <AppEntry>[];
+    final used = <AppEntry>[];
+    final unused = <AppEntry>[];
+
+    for (final app in sorted) {
+      if (_lockedApps.contains(app.packageName) || _showNewBadge(app)) {
+        newAndLocked.add(app);
+      } else {
+        final launches = _launchHistory[app.packageName];
+        if (launches != null && launches.isNotEmpty) {
+          used.add(app);
+        } else {
+          unused.add(app);
+        }
+      }
+    }
+
+    return (newAndLocked, used, unused);
   }
 
   // ---------------------------------------------------------------------------
@@ -226,31 +290,91 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   // ---------------------------------------------------------------------------
-  // 왼쪽 페이지: 빈도순 전체 앱
+  // 왼쪽 페이지: 빈도순 전체 앱 (사용/미사용 섹션)
   // ---------------------------------------------------------------------------
 
   Widget _buildFrequentPage() {
-    final sorted = _frequentAppsSorted();
+    final (newAndLocked, used, unused) = _splitApps();
     return CustomScrollView(
       slivers: [
-        SliverToBoxAdapter(child: _pageTitle('앱 목록', 'Apps')),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
-          sliver: SliverGrid(
-            gridDelegate: _gridDelegate,
-            delegate: SliverChildBuilderDelegate(
-              (context, i) {
-                final app = sorted[i];
-                return AppTile(
-                  app: app,
-                  onTap: () => _launch(app),
-                  showDayBadge: _dayBadgeEarned.contains(app.packageName),
-                );
-              },
-              childCount: sorted.length,
+        SliverToBoxAdapter(child: _pageTitle('앱 목록 / Apps')),
+        if (newAndLocked.isNotEmpty) ...[
+          SliverToBoxAdapter(child: _sectionHeader('신규 & 잠금 / New & Lock')),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+            sliver: SliverGrid(
+              gridDelegate: _gridDelegate,
+              delegate: SliverChildBuilderDelegate(
+                (context, i) {
+                  final app = newAndLocked[i];
+                  final locked = _lockedApps.contains(app.packageName);
+                  return AppTile(
+                    app: app,
+                    showLockBadge: locked,
+                    showNewBadge: !locked && _showNewBadge(app),
+                    showDayBadge: false,
+                    isLocked: locked,
+                    onTap: () => _launch(app, recordAsRecent: true),
+                    onClearRecord: () => _clearRecord(app.packageName),
+                    onToggleLock: () => _toggleLock(app.packageName),
+                  );
+                },
+                childCount: newAndLocked.length,
+              ),
             ),
           ),
-        ),
+        ],
+        if (used.isNotEmpty) ...[
+          SliverToBoxAdapter(child: _sectionHeader('사용 / Used')),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+            sliver: SliverGrid(
+              gridDelegate: _gridDelegate,
+              delegate: SliverChildBuilderDelegate(
+                (context, i) {
+                  final app = used[i];
+                  return AppTile(
+                    app: app,
+                    showNewBadge: false,
+                    showDayBadge: _dayBadgeEarned.contains(app.packageName),
+                    isLocked: false,
+                    onTap: () => _launch(app, recordAsRecent: true),
+                    onClearRecord: () => _clearRecord(app.packageName),
+                    onToggleLock: () => _toggleLock(app.packageName),
+                  );
+                },
+                childCount: used.length,
+              ),
+            ),
+          ),
+        ],
+        if (unused.isNotEmpty) ...[
+          SliverToBoxAdapter(child: _sectionHeader('미사용 / Unused')),
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
+            sliver: SliverGrid(
+              gridDelegate: _gridDelegate,
+              delegate: SliverChildBuilderDelegate(
+                (context, i) {
+                  final app = unused[i];
+                  return Opacity(
+                    opacity: 0.6,
+                    child: AppTile(
+                      app: app,
+                      showNewBadge: false,
+                      showDayBadge: false,
+                      isLocked: false,
+                      onTap: () => _launch(app, recordAsRecent: true),
+                      onClearRecord: () => _clearRecord(app.packageName),
+                      onToggleLock: () => _toggleLock(app.packageName),
+                    ),
+                  );
+                },
+                childCount: unused.length,
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -262,7 +386,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _buildSearchPage() {
     return Column(
       children: [
-        _pageTitle('최근 & 검색', 'Recent & Search'),
+        _pageTitle('최근 & 검색 / Recent & Search'),
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
           child: TextField(
@@ -270,7 +394,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             autofocus: false,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: '앱 검색',
+              hintText: '앱 검색 / Search',
               prefixIcon: const Icon(Icons.search),
               suffixIcon: _query.isEmpty
                   ? null
@@ -306,7 +430,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     if (recentApps.isEmpty) {
       return const Center(
-        child: Text('검색어를 입력하세요', style: TextStyle(color: Colors.grey)),
+        child: Text(
+          '검색어를 입력하세요\nEnter a search term',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.grey),
+        ),
       );
     }
 
@@ -319,7 +447,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             delegate: SliverChildBuilderDelegate(
               (context, i) {
                 final app = recentApps[i];
-                return AppTile(app: app, onTap: () => _launch(app));
+                return AppTile(
+                  app: app,
+                  showLockBadge: _lockedApps.contains(app.packageName),
+                  showNewBadge: !_lockedApps.contains(app.packageName) && _showNewBadge(app),
+                  showDayBadge: _dayBadgeEarned.contains(app.packageName),
+                  isLocked: _lockedApps.contains(app.packageName),
+                  onTap: () => _launch(app),
+                  onClearRecord: () => _clearRecord(app.packageName),
+                  onToggleLock: () => _toggleLock(app.packageName),
+                );
               },
               childCount: recentApps.length,
             ),
@@ -335,7 +472,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         SearchEngine.search(_searchController.text, _apps, _history);
     if (results.isEmpty) {
       return const Center(
-        child: Text('검색 결과 없음', style: TextStyle(color: Colors.grey)),
+        child: Text('검색 결과 없음 / No Results', style: TextStyle(color: Colors.grey)),
       );
     }
     return CustomScrollView(
@@ -349,11 +486,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 final app = results[i];
                 return AppTile(
                   app: app,
+                  showLockBadge: _lockedApps.contains(app.packageName),
+                  showNewBadge: !_lockedApps.contains(app.packageName) && _showNewBadge(app),
+                  showDayBadge: _dayBadgeEarned.contains(app.packageName),
+                  isLocked: _lockedApps.contains(app.packageName),
                   onTap: () => _launch(
                     app,
                     historyKeyword: _searchController.text,
                     recordAsRecent: true,
                   ),
+                  onClearRecord: () => _clearRecord(app.packageName),
+                  onToggleLock: () => _toggleLock(app.packageName),
                 );
               },
               childCount: results.length,
@@ -365,25 +508,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  static const _donationOptions = [
-    ('커피 한 잔', '1,100원'),
-    ('음료 한 잔', '3,300원'),
-    ('식사 한 끼', '5,500원'),
-    ('큰 후원', '11,000원'),
-  ];
-
   Future<void> _showDonationDialog() async {
+    final products = DonationService.products;
+    if (products.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('후원 서비스를 불러오는 중입니다 / Loading purchase service...'),
+        ),
+      );
+      return;
+    }
+
     var selected = 0;
     await showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('후원하기'),
+          title: const Text('후원하기 / Support'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                '앱이 유용하셨다면 제작자에게 응원을 보내주세요',
+                '앱이 유용하셨다면 제작자에게 응원을 보내주세요\nIf you found this app useful, please support the developer',
                 style: TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 16),
@@ -394,15 +540,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 },
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: List.generate(_donationOptions.length, (i) {
-                    final (label, price) = _donationOptions[i];
+                  children: List.generate(products.length, (i) {
+                    final p = products[i];
                     return RadioListTile<int>(
                       value: i,
-                      title: Text(label),
+                      title: Text(DonationService.labelFor(p.id)),
                       secondary: Text(
-                        price,
-                        style:
-                            const TextStyle(fontWeight: FontWeight.bold),
+                        p.price,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
                       ),
                       contentPadding: EdgeInsets.zero,
                       dense: true,
@@ -415,11 +560,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: const Text('취소'),
+              child: const Text('취소 / Cancel'),
             ),
             FilledButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('후원'),
+              onPressed: () {
+                Navigator.pop(ctx);
+                DonationService.buy(products[selected]);
+              },
+              child: const Text('후원 / Support'),
             ),
           ],
         ),
@@ -427,42 +575,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _pageTitle(String ko, String en) {
+  Widget _sectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Text(
+        title,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: Theme.of(context).colorScheme.onSurface.withAlpha(160),
+        ),
+      ),
+    );
+  }
+
+  Widget _pageTitle(String title) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 4, 4),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  ko,
-                  textAlign: TextAlign.left,
-                  style: const TextStyle(
-                      fontSize: 22, fontWeight: FontWeight.bold),
-                ),
-                Text(
-                  en,
-                  textAlign: TextAlign.left,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color:
-                        Theme.of(context).colorScheme.onSurface.withAlpha(128),
-                  ),
-                ),
-              ],
+            child: Text(
+              title,
+              textAlign: TextAlign.left,
+              style: const TextStyle(
+                  fontSize: 22, fontWeight: FontWeight.bold),
             ),
           ),
           IconButton(
             icon: const Icon(Icons.home_outlined),
-            tooltip: '기본 런처 설정',
+            tooltip: '기본 런처 설정 / Set as Default',
             onPressed: AppService.openHomeSettings,
           ),
           IconButton(
             icon: const Icon(Icons.favorite_border),
-            tooltip: '후원하기',
+            tooltip: '후원하기 / Support',
             onPressed: _showDonationDialog,
           ),
         ],

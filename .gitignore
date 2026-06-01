@@ -51,3 +51,18 @@ app.*.map.json
 
 # Claude Code MCP 설정 (머신-종속 로컬 경로 포함)
 .mcp.json
+
+# 대용량 미디어 — 용량 문제 유발하는 영상/오디오는 제외
+# (.png 이미지는 커밋 대상이므로 제외하지 않음)
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.m4v
+*.wmv
+*.flv
+*.mp3
+*.wav
+*.aac
+*.m4a

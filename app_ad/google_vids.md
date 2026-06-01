@@ -1,0 +1,1 @@
+Audio: no background music, no soundtrack, no dialogue, only sound effect

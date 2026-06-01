@@ -35,7 +35,7 @@ class AppEntry {
   final String initials;
 
   bool get isNew =>
-      DateTime.now().difference(firstInstallTime) < const Duration(days: 7);
+      DateTime.now().difference(firstInstallTime) < const Duration(hours: 24);
 
   /// Returns a copy with [icon] replaced.
   AppEntry copyWithIcon(Uint8List? icon) => AppEntry(

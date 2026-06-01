@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
 import '../models/app_entry.dart';
 import '../services/app_service.dart';
@@ -25,9 +26,7 @@ const double _kNameFontSize = 12;
 /// Line-height multiplier of the app name.
 const double _kNameLineHeight = 1.1;
 
-/// Height reserved for the app name: always two lines, so a single-line name
-/// occupies the same vertical space as a two-line one and every tile in a
-/// row keeps its icon at the same height.
+/// Height reserved for the app name: always two lines.
 const double _kNameHeight = _kNameFontSize * _kNameLineHeight * 2;
 
 /// A single grid cell: app icon above its name, with optional badges.
@@ -37,17 +36,33 @@ class AppTile extends StatelessWidget {
     required this.app,
     required this.onTap,
     this.showDayBadge = false,
+    this.showNewBadge = false,
+    this.showLockBadge = false,
+    this.isLocked = false,
+    this.onClearRecord,
+    this.onToggleLock,
   });
 
   final AppEntry app;
   final VoidCallback onTap;
   final bool showDayBadge;
+  final bool showNewBadge;
+  final bool showLockBadge;
+  final bool isLocked;
+  final VoidCallback? onClearRecord;
+  final VoidCallback? onToggleLock;
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
       onTap: onTap,
-      onLongPress: () => showAppActions(context, app),
+      onLongPress: () => showAppActions(
+        context,
+        app,
+        isLocked: isLocked,
+        onToggleLock: onToggleLock,
+        onClearRecord: onClearRecord,
+      ),
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
@@ -58,7 +73,13 @@ class AppTile extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 _iconWidget(app.icon, 52),
-                if (app.isNew)
+                if (showLockBadge)
+                  Positioned(
+                    top: -4,
+                    right: -6,
+                    child: _lockBadge(),
+                  )
+                else if (showNewBadge)
                   Positioned(
                     top: -4,
                     right: -6,
@@ -109,9 +130,23 @@ Widget _badge(String text, Color color) => Container(
       ),
     );
 
-/// Shows the long-press action popup: Delete, App info, Play Store.
-/// Delete is disabled for system apps, which cannot be uninstalled.
-Future<void> showAppActions(BuildContext context, AppEntry app) {
+Widget _lockBadge() => Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: Colors.blueAccent.shade200,
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: const Icon(Icons.lock, size: 10, color: Colors.white),
+    );
+
+/// Shows the long-press action popup.
+Future<void> showAppActions(
+  BuildContext context,
+  AppEntry app, {
+  bool isLocked = false,
+  VoidCallback? onToggleLock,
+  VoidCallback? onClearRecord,
+}) {
   return showModalBottomSheet<void>(
     context: context,
     builder: (sheetContext) {
@@ -136,20 +171,42 @@ Future<void> showAppActions(BuildContext context, AppEntry app) {
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('Delete'),
-              enabled: !app.isSystem,
-              subtitle: app.isSystem
-                  ? const Text('시스템 앱은 삭제할 수 없습니다')
-                  : null,
+              leading: Icon(isLocked ? Icons.lock_open : Icons.lock_outline),
+              title: Text(isLocked ? '잠금 해제 / Unlock' : '잠금 / Lock'),
               onTap: () {
                 Navigator.pop(sheetContext);
-                AppService.uninstall(app.packageName);
+                onToggleLock?.call();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.history_toggle_off),
+              title: const Text('기록 삭제 / Clear History'),
+              onTap: () {
+                Navigator.pop(sheetContext);
+                onClearRecord?.call();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('삭제 / Delete'),
+              enabled: !app.isSystem,
+              subtitle: app.isSystem
+                  ? const Text('시스템 앱은 삭제할 수 없습니다\nSystem apps cannot be uninstalled')
+                  : null,
+              onTap: () async {
+                Navigator.pop(sheetContext);
+                try {
+                  await AppService.uninstall(app.packageName);
+                } on Exception catch (e) {
+                  if (context.mounted) {
+                    _showErrorDialog(context, e.toString());
+                  }
+                }
               },
             ),
             ListTile(
               leading: const Icon(Icons.info_outline),
-              title: const Text('App info'),
+              title: const Text('앱 정보 / App Info'),
               onTap: () {
                 Navigator.pop(sheetContext);
                 AppService.openAppInfo(app.packageName);
@@ -157,7 +214,7 @@ Future<void> showAppActions(BuildContext context, AppEntry app) {
             ),
             ListTile(
               leading: const Icon(Icons.shop_outlined),
-              title: const Text('Play Store'),
+              title: const Text('스토어 / Play Store'),
               onTap: () {
                 Navigator.pop(sheetContext);
                 AppService.openPlayStore(app.packageName);
@@ -167,5 +224,35 @@ Future<void> showAppActions(BuildContext context, AppEntry app) {
         ),
       );
     },
+  );
+}
+
+void _showErrorDialog(BuildContext context, String message) {
+  showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setState) {
+        var copied = false;
+        return AlertDialog(
+          title: const Text('삭제 실패 / Delete Failed'),
+          content: SingleChildScrollView(child: SelectableText(message)),
+          actions: [
+            TextButton.icon(
+              icon: Icon(copied ? Icons.check : Icons.copy, size: 18),
+              label: Text(copied ? '복사됨 / Copied' : '복사 / Copy'),
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: message));
+                setState(() => copied = true);
+              },
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('닫기 / Close'),
+            ),
+          ],
+        );
+      },
+    ),
   );
 }

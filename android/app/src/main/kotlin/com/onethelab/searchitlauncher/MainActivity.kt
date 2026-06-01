@@ -24,7 +24,7 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterActivity() {
 
     private val channelName = "searchit/apps"
-    private val iconSize = 72
+    private val iconSize = 192
     private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -43,10 +43,17 @@ class MainActivity : FlutterActivity() {
                         result.success(launchApp(call.argument<String>("package")))
                     }
                     "uninstallApp" -> {
-                        openIntent(Intent(Intent.ACTION_DELETE).apply {
-                            data = Uri.parse("package:${call.argument<String>("package")}")
-                        })
-                        result.success(null)
+                        val pkg = call.argument<String>("package")
+                        if (pkg == null) {
+                            result.error("INVALID_ARG", "package is null", null)
+                        } else {
+                            try {
+                                requestUninstall(pkg)
+                                result.success(null)
+                            } catch (e: Exception) {
+                                result.error("UNINSTALL_FAILED", e.message, e.toString())
+                            }
+                        }
                     }
                     "openAppInfo" -> {
                         openIntent(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -147,12 +154,12 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun iconCacheFile(pkg: String, versionCode: Long): File {
-        val dir = File(cacheDir, "icons").apply { mkdirs() }
+        val dir = File(cacheDir, "icons_${iconSize}").apply { mkdirs() }
         return File(dir, "${pkg}_$versionCode.png")
     }
 
     private fun pruneIconCache(currentPackages: Set<String>) {
-        val iconDir = File(cacheDir, "icons")
+        val iconDir = File(cacheDir, "icons_${iconSize}")
         if (!iconDir.exists()) return
         iconDir.listFiles()?.forEach { file ->
             val pkg = file.name.substringBeforeLast('_')
@@ -177,6 +184,20 @@ class MainActivity : FlutterActivity() {
             openIntent(Intent(Intent.ACTION_VIEW,
                 Uri.parse("https://play.google.com/store/apps/details?id=$pkg")))
         }
+    }
+
+    /**
+     * Requests uninstallation of [pkg] via the system dialog.
+     * Does NOT use FLAG_ACTIVITY_NEW_TASK: launchers with singleTask +
+     * taskAffinity="" can cause the dialog to be hidden behind the launcher
+     * when that flag is set. Starting in the same task keeps it in front.
+     */
+    private fun requestUninstall(pkg: String) {
+        startActivity(
+            Intent(Intent.ACTION_DELETE, Uri.parse("package:$pkg")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
     }
 
     private fun openIntent(intent: Intent) {

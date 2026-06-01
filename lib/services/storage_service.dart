@@ -35,6 +35,8 @@ class StorageService {
   static const _launchHistoryKey = 'launch_history_v2';
   static const _launchRetentionDays = 30;
   static const _dayBadgeEarnedKey = 'day_badge_earned';
+  static const _newBadgeDismissedKey = 'new_badge_dismissed';
+  static const _lockedAppsKey = 'locked_apps';
   static const _appCacheKey = 'app_cache_v1';
 
   static SharedPreferences? _prefs;
@@ -118,6 +120,77 @@ class StorageService {
 
   static Future<void> saveDayBadgeEarned(Set<String> earned) async =>
       (await _store).setStringList(_dayBadgeEarnedKey, earned.toList());
+
+  // --- New badge dismissed set ----------------------------------------------
+
+  static Future<Set<String>> loadNewBadgeDismissed() async =>
+      ((await _store).getStringList(_newBadgeDismissedKey) ?? []).toSet();
+
+  static Future<void> saveNewBadgeDismissed(Set<String> dismissed) async =>
+      (await _store).setStringList(_newBadgeDismissedKey, dismissed.toList());
+
+  // --- Locked apps set ------------------------------------------------------
+
+  static Future<Set<String>> loadLockedApps() async =>
+      ((await _store).getStringList(_lockedAppsKey) ?? []).toSet();
+
+  static Future<void> saveLockedApps(Set<String> locked) async =>
+      (await _store).setStringList(_lockedAppsKey, locked.toList());
+
+  // --- Auto-prune stale records (30일 미사용 앱 자동 정리) -------------------
+
+  /// 최근 [_launchRetentionDays]일 이내 실행 기록이 없는 앱의 기록을 일괄 삭제.
+  /// _load() 시작 시 호출해 미사용 섹션으로 자동 이동시킨다.
+  static Future<void> pruneStaleRecords() async {
+    final prefs = await _store;
+
+    final raw = prefs.getString(_launchHistoryKey);
+    if (raw == null || raw.isEmpty) return;
+
+    final history = (jsonDecode(raw) as Map<String, dynamic>)
+        .map((k, v) => MapEntry(k, (v as List).cast<int>()));
+
+    final cutoff = DateTime.now()
+        .subtract(const Duration(days: _launchRetentionDays))
+        .millisecondsSinceEpoch;
+
+    final stale = history.entries
+        .where((e) => e.value.isNotEmpty && e.value.every((ts) => ts < cutoff))
+        .map((e) => e.key)
+        .toSet();
+
+    if (stale.isEmpty) return;
+
+    for (final pkg in stale) history.remove(pkg);
+    await prefs.setString(_launchHistoryKey, jsonEncode(history));
+
+    final recents = (prefs.getStringList(_recentKey) ?? [])
+      ..removeWhere(stale.contains);
+    await prefs.setStringList(_recentKey, recents);
+
+    final dayBadge = (prefs.getStringList(_dayBadgeEarnedKey) ?? []).toSet()
+      ..removeAll(stale);
+    await prefs.setStringList(_dayBadgeEarnedKey, dayBadge.toList());
+  }
+
+  // --- Clear app record (long-press action) ---------------------------------
+
+  static Future<void> clearAppRecord(String packageName) async {
+    final prefs = await _store;
+
+    final history = await loadLaunchHistory();
+    history.remove(packageName);
+    await prefs.setString(_launchHistoryKey, jsonEncode(history));
+
+    final recents = (await loadRecents())..remove(packageName);
+    await prefs.setStringList(_recentKey, recents);
+
+    final dayBadge = await loadDayBadgeEarned()..remove(packageName);
+    await prefs.setStringList(_dayBadgeEarnedKey, dayBadge.toList());
+
+    final dismissed = await loadNewBadgeDismissed()..add(packageName);
+    await prefs.setStringList(_newBadgeDismissedKey, dismissed.toList());
+  }
 
   // --- App metadata cache (no icons) ----------------------------------------
 
