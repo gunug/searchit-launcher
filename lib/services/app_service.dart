@@ -7,6 +7,27 @@ class AppService {
 
   static const _channel = MethodChannel('searchit/apps');
 
+  /// Registers a callback invoked when another app is installed, updated, or
+  /// uninstalled. [action] is one of 'added', 'replaced', 'removed'.
+  /// On 'replaced' the native side has already cleared that package's icon
+  /// cache, so [getIcons] will regenerate a fresh icon.
+  static void setOnPackageChanged(
+      Future<void> Function(String package, String action)? callback) {
+    if (callback == null) {
+      _channel.setMethodCallHandler(null);
+      return;
+    }
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onPackageChanged') {
+        final args = call.arguments as Map<dynamic, dynamic>;
+        await callback(
+          args['package'] as String,
+          args['action'] as String,
+        );
+      }
+    });
+  }
+
   /// Phase 1: app metadata only (no icons) — very fast.
   static Future<List<AppEntry>> getAppsMetadata() async {
     final raw =

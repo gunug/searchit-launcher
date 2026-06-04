@@ -1,6 +1,9 @@
 package com.onethelab.searchitlauncher
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -27,10 +30,44 @@ class MainActivity : FlutterActivity() {
     private val iconSize = 192
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    private var channel: MethodChannel? = null
+    private var receiverRegistered = false
+
+    /**
+     * Listens for install/update/uninstall of other apps and notifies Flutter.
+     * On update (PACKAGE_REPLACED) the stale disk icon cache is invalidated so the
+     * launcher can re-fetch the new icon immediately, instead of waiting for a cold
+     * start. PACKAGE_REPLACED fires for updates; ADDED/REMOVED only when the
+     * EXTRA_REPLACING flag is absent (i.e. a genuine install / uninstall).
+     */
+    private val packageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val pkg = intent.data?.schemeSpecificPart ?: return
+            if (pkg == packageName) return
+            val replacing = intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)
+            val action = when (intent.action) {
+                Intent.ACTION_PACKAGE_REPLACED -> {
+                    invalidateIconCache(pkg)
+                    "replaced"
+                }
+                Intent.ACTION_PACKAGE_ADDED -> if (replacing) return else "added"
+                Intent.ACTION_PACKAGE_REMOVED -> if (replacing) return else "removed"
+                else -> return
+            }
+            mainHandler.post {
+                channel?.invokeMethod(
+                    "onPackageChanged",
+                    mapOf("package" to pkg, "action" to action),
+                )
+            }
+        }
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
-            .setMethodCallHandler { call, result ->
+        registerPackageReceiver()
+        channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .also { it.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getAppsMetadata" -> loadAppsMetadata(result)
                     "getIcons" -> {
@@ -71,7 +108,29 @@ class MainActivity : FlutterActivity() {
                     }
                     else -> result.notImplemented()
                 }
-            }
+            } }
+    }
+
+    private fun registerPackageReceiver() {
+        if (receiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
+        }
+        registerReceiver(packageReceiver, filter)
+        receiverRegistered = true
+    }
+
+    override fun onDestroy() {
+        if (receiverRegistered) {
+            try { unregisterReceiver(packageReceiver) } catch (_: Exception) {}
+            receiverRegistered = false
+        }
+        channel?.setMethodCallHandler(null)
+        channel = null
+        super.onDestroy()
     }
 
     /**
@@ -156,6 +215,16 @@ class MainActivity : FlutterActivity() {
     private fun iconCacheFile(pkg: String, versionCode: Long): File {
         val dir = File(cacheDir, "icons_${iconSize}").apply { mkdirs() }
         return File(dir, "${pkg}_$versionCode.png")
+    }
+
+    /** Deletes all cached icon files for [pkg] (any versionCode) so the next
+     * getIcons call regenerates a fresh icon. Used when an app is updated. */
+    private fun invalidateIconCache(pkg: String) {
+        val iconDir = File(cacheDir, "icons_${iconSize}")
+        if (!iconDir.exists()) return
+        iconDir.listFiles()?.forEach { file ->
+            if (file.name.substringBeforeLast('_') == pkg) file.delete()
+        }
     }
 
     private fun pruneIconCache(currentPackages: Set<String>) {

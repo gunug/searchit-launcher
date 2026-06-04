@@ -44,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _load();
+    AppService.setOnPackageChanged(_onPackageChanged);
     DonationService.init();
     DonationService.setOnResult((success) {
       if (!mounted) return;
@@ -58,6 +59,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    AppService.setOnPackageChanged(null);
     _searchController.dispose();
     _pageController.dispose();
     DonationService.dispose();
@@ -173,6 +175,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _apps = finalApps;
       _byPackage = {for (final a in finalApps) a.packageName: a};
     });
+  }
+
+  /// 다른 앱이 설치/업데이트/삭제될 때 네이티브에서 호출된다.
+  /// 업데이트(replaced) 시 네이티브가 이미 디스크 아이콘 캐시를 비웠으므로
+  /// 해당 앱 아이콘만 강제로 다시 받아 즉시 교체한다(콜드스타트 대기 불필요).
+  Future<void> _onPackageChanged(String pkg, String action) async {
+    if (!mounted) return;
+    if (action == 'replaced') {
+      final icons = await AppService.getIcons([pkg]);
+      final icon = icons[pkg];
+      if (icon == null || !mounted) return;
+      final updated = _apps
+          .map((a) => a.packageName == pkg ? a.copyWithIcon(icon) : a)
+          .toList();
+      setState(() {
+        _apps = updated;
+        _byPackage = {for (final a in updated) a.packageName: a};
+      });
+    } else {
+      // 설치 / 삭제 → 목록 전체 재로드
+      await _load();
+    }
   }
 
   Future<void> _launch(
