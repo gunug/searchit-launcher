@@ -415,6 +415,15 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
+    // 언어 변경 시 홈 화면을 다시 그린다. (HomeScreen은 라우트로 캐시되어
+    // MaterialApp 리빌드만으로는 build가 재실행되지 않으므로 직접 구독한다.)
+    return ValueListenableBuilder<AppLang>(
+      valueListenable: appLang,
+      builder: (context, _, child) => _buildScaffold(),
+    );
+  }
+
+  Widget _buildScaffold() {
     if (_loading) {
       return const Scaffold(
         body: Center(child: CircularProgressIndicator()),
