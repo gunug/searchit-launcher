@@ -97,3 +97,43 @@ print(f"Done! versionCode {bundle['versionCode']} → internal track")
 4. `rm -rf build && flutter build appbundle`
 5. 위 Python 스크립트 실행 (KO_NOTES, EN_NOTES, AAB_PATH 채워서)
 6. `docs/releases.md` 상태 → 출시됨
+
+### 3. 프로덕션 출시 (internal 검증 후 승격)
+
+프로덕션은 **새로 빌드/업로드하지 않는다.** internal 트랙에서 검증된 **동일 versionCode를 프로덕션 트랙으로 "승격"** 한다.
+- **같은 versionCode로 AAB를 다시 업로드하면 Play가 거부**하므로, 번들 업로드 없이 `tracks().update()`로 기존 versionCode만 프로덕션 트랙에 지정한다.
+- 인증 정보(KEY_FILE, PACKAGE)는 internal과 동일.
+
+```python
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+
+KEY_FILE     = r"C:\Users\One The Lab\Downloads\effortless-launcher-e202f6c046c1.json"
+PACKAGE      = "com.onethelab.searchitlauncher"
+VERSION_CODE = "<internal에서 검증한 versionCode>"
+KO_NOTES     = "<직전 프로덕션 버전 대비 변경 — 한국어>"
+EN_NOTES     = "<changes vs previous production version — English>"
+
+SCOPES  = ["https://www.googleapis.com/auth/androidpublisher"]
+creds   = service_account.Credentials.from_service_account_file(KEY_FILE, scopes=SCOPES)
+service = build("androidpublisher", "v3", credentials=creds)
+
+edit = service.edits().insert(packageName=PACKAGE, body={}).execute()
+service.edits().tracks().update(
+    packageName=PACKAGE, editId=edit["id"], track="production",
+    body={"track": "production", "releases": [{"status": "completed",   # 100% 출시
+        "versionCodes": [VERSION_CODE],
+        "releaseNotes": [{"language": "ko-KR", "text": KO_NOTES},
+                         {"language": "en-US", "text": EN_NOTES}]}]}
+).execute()
+service.edits().commit(packageName=PACKAGE, editId=edit["id"]).execute()
+print(f"Done! versionCode {VERSION_CODE} → production track (100%)")
+```
+
+#### 주의
+- **100% 출시**: `status: "completed"`.
+- **단계적 출시**: `status: "inProgress"` + `userFraction: 0.1`(10%) 등. (사용자에게 비율 확인 후 진행)
+- **출시 노트는 직전 프로덕션 버전과의 차이**를 담는다(internal 빌드 단위 노트가 아님). 예: 프로덕션이 1.2.5인데 1.3.0+26을 올리면 1.3.0의 기능 전체를 적는다.
+- 프로덕션은 실제 사용자에게 영향을 주는 **되돌리기 어려운 외부 공개 작업**이므로 진행 전 사용자 확인 필수.
+- commit 후 Play 검토(수 시간~1일)를 거쳐 노출. 계정에 **managed publishing**이 켜져 있으면 commit 후에도 Play Console에서 수동 "게시"가 필요할 수 있다.
+- 승격 후 `docs/releases.md` 해당 versionCode 행 상태를 `출시됨(프로덕션 N%)`로 갱신한다.
