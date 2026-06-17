@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/strings.dart';
 import '../models/app_entry.dart';
 import '../models/badge.dart';
 import '../search/search_engine.dart';
@@ -18,7 +19,8 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+class _HomeScreenState extends State<HomeScreen>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   static const _gridDelegate = SliverGridDelegateWithMaxCrossAxisExtent(
     maxCrossAxisExtent: 90,
     mainAxisExtent: 100,
@@ -26,6 +28,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   final _searchController = TextEditingController();
   final _pageController = PageController();
+
+  // 기본 홈 앱(집모양) 버튼 강조용 깜빡임. 정지(rest) 상태에서는 controller 값이
+  // 0.0 → 페이드 1.0 / 스케일 1.0(평상시 모습)이 된다.
+  late final AnimationController _blinkController;
+  late final Animation<double> _blinkFade;
+  late final Animation<double> _blinkScale;
 
   List<AppEntry> _apps = [];
   Map<String, AppEntry> _byPackage = {};
@@ -43,17 +51,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    _blinkController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 650),
+    );
+    final curve = CurvedAnimation(
+      parent: _blinkController,
+      curve: Curves.easeInOut,
+    );
+    _blinkFade = Tween<double>(begin: 1.0, end: 0.35).animate(curve);
+    _blinkScale = Tween<double>(begin: 1.0, end: 1.3).animate(curve);
+
     _load();
     AppService.setOnPackageChanged(_onPackageChanged);
     DonationService.init();
     DonationService.setOnResult((success) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(success
-            ? '후원 감사합니다! / Thank you for your support!'
-            : '결제에 실패했습니다 / Purchase failed'),
+        content: Text(success ? tr.donationThanks : tr.purchaseFailed),
       ));
     });
+
+    // 첫 실행 플로우(언어 선택 → 튜토리얼)는 한 번만 수행.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _maybeRunFirstRun());
   }
 
   @override
@@ -62,8 +83,108 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     AppService.setOnPackageChanged(null);
     _searchController.dispose();
     _pageController.dispose();
+    _blinkController.dispose();
     DonationService.dispose();
     super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 첫 실행 플로우 + 언어 설정 + 깜빡임
+  // ---------------------------------------------------------------------------
+
+  /// 첫 실행이면 언어를 먼저 고르게 하고, 이어서 기본 홈 앱 튜토리얼을 띄운다.
+  Future<void> _maybeRunFirstRun() async {
+    final savedLang = await StorageService.loadLanguage();
+    if (!mounted) return;
+    if (savedLang == null) {
+      await _showLanguageDialog(firstRun: true);
+      if (!mounted) return;
+    }
+
+    if (await StorageService.isHomeGuideShown()) return;
+    if (!mounted) return;
+    await _showHomeGuideDialog();
+  }
+
+  /// 언어 선택 다이얼로그. 첫 실행 시엔 닫기 불가(반드시 선택).
+  Future<void> _showLanguageDialog({required bool firstRun}) async {
+    var selected = appLang.value;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: !firstRun,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          // 첫 실행 땐 아직 언어가 확정되지 않았으니 병기 라벨로 안내.
+          title: Text(firstRun ? '언어 / Language' : tr.language),
+          content: RadioGroup<AppLang>(
+            groupValue: selected,
+            onChanged: (v) {
+              if (v != null) setDialogState(() => selected = v);
+            },
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile<AppLang>(
+                  value: AppLang.ko,
+                  title: Text('한국어'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+                RadioListTile<AppLang>(
+                  value: AppLang.en,
+                  title: Text('English'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () async {
+                await StorageService.saveLanguage(selected);
+                appLang.value = selected;
+                if (ctx.mounted) Navigator.pop(ctx);
+              },
+              child: Text(firstRun ? '확인 / OK' : tr.ok),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 기본 홈 앱 안내(튜토리얼). 확인을 누르면 집모양 버튼 깜빡임을 시작한다.
+  Future<void> _showHomeGuideDialog() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.home_outlined),
+            const SizedBox(width: 8),
+            Expanded(child: Text(tr.tutorialTitle)),
+          ],
+        ),
+        content: Text(tr.tutorialBody, style: const TextStyle(height: 1.4)),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(tr.ok),
+          ),
+        ],
+      ),
+    );
+    await StorageService.markHomeGuideShown();
+    if (mounted) _startBlink();
+  }
+
+  void _startBlink() => _blinkController.repeat(reverse: true);
+
+  void _stopBlink() {
+    if (!_blinkController.isAnimating) return;
+    _blinkController
+      ..stop()
+      ..reset(); // 평상시 모습(페이드 1.0 / 스케일 1.0)으로 복귀
   }
 
   @override
@@ -321,9 +442,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final (newAndLocked, used, unused) = _splitApps();
     return CustomScrollView(
       slivers: [
-        SliverToBoxAdapter(child: _pageTitle('앱 목록 / Apps')),
+        SliverToBoxAdapter(child: _pageTitle(tr.appList)),
         if (newAndLocked.isNotEmpty) ...[
-          SliverToBoxAdapter(child: _sectionHeader('신규 & 잠금 / New & Lock')),
+          SliverToBoxAdapter(child: _sectionHeader(tr.sectionNewLock)),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
             sliver: SliverGrid(
@@ -349,7 +470,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         ],
         if (used.isNotEmpty) ...[
-          SliverToBoxAdapter(child: _sectionHeader('사용 / Used')),
+          SliverToBoxAdapter(child: _sectionHeader(tr.sectionUsed)),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
             sliver: SliverGrid(
@@ -373,7 +494,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         ],
         if (unused.isNotEmpty) ...[
-          SliverToBoxAdapter(child: _sectionHeader('미사용 / Unused')),
+          SliverToBoxAdapter(child: _sectionHeader(tr.sectionUnused)),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
             sliver: SliverGrid(
@@ -410,7 +531,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Widget _buildSearchPage() {
     return Column(
       children: [
-        _pageTitle('최근 & 검색 / Recent & Search'),
+        _pageTitle(tr.recentSearch),
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
           child: TextField(
@@ -418,7 +539,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             autofocus: false,
             textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: '앱 검색 / Search',
+              hintText: tr.searchHint,
               prefixIcon: const Icon(Icons.search),
               suffixIcon: _query.isEmpty
                   ? null
@@ -453,11 +574,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         .toList();
 
     if (recentApps.isEmpty) {
-      return const Center(
+      return Center(
         child: Text(
-          '검색어를 입력하세요\nEnter a search term',
+          tr.enterSearchTerm,
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.grey),
+          style: const TextStyle(color: Colors.grey),
         ),
       );
     }
@@ -495,8 +616,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final results =
         SearchEngine.search(_searchController.text, _apps, _history);
     if (results.isEmpty) {
-      return const Center(
-        child: Text('검색 결과 없음 / No Results', style: TextStyle(color: Colors.grey)),
+      return Center(
+        child: Text(tr.noResults, style: const TextStyle(color: Colors.grey)),
       );
     }
     return CustomScrollView(
@@ -536,9 +657,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final products = DonationService.products;
     if (products.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('후원 서비스를 불러오는 중입니다 / Loading purchase service...'),
-        ),
+        SnackBar(content: Text(tr.loadingPurchase)),
       );
       return;
     }
@@ -548,13 +667,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('후원하기 / Support'),
+          title: Text(tr.supportTitle),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                '앱이 유용하셨다면 제작자에게 응원을 보내주세요\nIf you found this app useful, please support the developer',
-                style: TextStyle(fontSize: 13),
+              Text(
+                tr.supportBody,
+                style: const TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 16),
               RadioGroup<int>(
@@ -584,14 +703,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: const Text('취소 / Cancel'),
+              child: Text(tr.cancel),
             ),
             FilledButton(
               onPressed: () {
                 Navigator.pop(ctx);
                 DonationService.buy(products[selected]);
               },
-              child: const Text('후원 / Support'),
+              child: Text(tr.supportShort),
             ),
           ],
         ),
@@ -628,13 +747,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.home_outlined),
-            tooltip: '기본 런처 설정 / Set as Default',
-            onPressed: AppService.openHomeSettings,
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: tr.settings,
+            onPressed: () => _showLanguageDialog(firstRun: false),
+          ),
+          // 집모양 버튼 — 튜토리얼 직후 페이드+스케일로 깜빡이며, 누르면 정지한다.
+          FadeTransition(
+            opacity: _blinkFade,
+            child: ScaleTransition(
+              scale: _blinkScale,
+              child: IconButton(
+                icon: const Icon(Icons.home_outlined),
+                tooltip: tr.homeSettingsTooltip,
+                onPressed: () {
+                  _stopBlink();
+                  AppService.openHomeSettings();
+                },
+              ),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.favorite_border),
-            tooltip: '후원하기 / Support',
+            tooltip: tr.supportTitle,
             onPressed: _showDonationDialog,
           ),
         ],

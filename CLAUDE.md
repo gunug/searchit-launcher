@@ -50,7 +50,7 @@ Flutter 기반 Android 런처 앱. 한국어 초성 검색을 지원한다.
 빌드가 끝나면 **Python 스크립트로 직접 내부 테스트 트랙에 출시한다.** 사용자가 Play Console 웹을 열 필요 없다.
 
 #### 인증 정보
-- **서비스 계정 키**: `C:\Users\gunug\Downloads\effortless-launcher-e202f6c046c1.json`
+- **서비스 계정 키**: `C:\Users\One The Lab\Downloads\effortless-launcher-e202f6c046c1.json`
   - git에 커밋하지 말 것. 분실 시 Play Console → 설정 → API 액세스에서 재발급.
 - **패키지**: `com.onethelab.searchitlauncher`
 
@@ -61,7 +61,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
 
-KEY_FILE = r"C:\Users\gunug\Downloads\effortless-launcher-e202f6c046c1.json"
+KEY_FILE = r"C:\Users\One The Lab\Downloads\effortless-launcher-e202f6c046c1.json"
 PACKAGE  = "com.onethelab.searchitlauncher"
 AAB_PATH = r"<프로젝트루트>\build\app\outputs\bundle\release\app-release.aab"
 TRACK    = "internal"

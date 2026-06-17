@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../l10n/strings.dart';
 import '../models/app_entry.dart';
 
 /// One stored search keyword and the apps that were launched under it from
@@ -38,11 +39,31 @@ class StorageService {
   static const _newBadgeDismissedKey = 'new_badge_dismissed';
   static const _lockedAppsKey = 'locked_apps';
   static const _appCacheKey = 'app_cache_v1';
+  static const _languageKey = 'app_language';
+  static const _homeGuideShownKey = 'home_guide_shown';
 
   static SharedPreferences? _prefs;
 
   static Future<SharedPreferences> get _store async =>
       _prefs ??= await SharedPreferences.getInstance();
+
+  // --- Language / first-run -------------------------------------------------
+
+  /// 저장된 언어를 반환한다. 한 번도 선택하지 않았으면 null(= 첫 실행 신호).
+  static Future<AppLang?> loadLanguage() async {
+    final code = (await _store).getString(_languageKey);
+    return code == null ? null : AppLang.fromCode(code);
+  }
+
+  static Future<void> saveLanguage(AppLang lang) async =>
+      (await _store).setString(_languageKey, lang.code);
+
+  /// 기본 홈 앱 안내(튜토리얼)를 이미 보여줬는지 여부.
+  static Future<bool> isHomeGuideShown() async =>
+      (await _store).getBool(_homeGuideShownKey) ?? false;
+
+  static Future<void> markHomeGuideShown() async =>
+      (await _store).setBool(_homeGuideShownKey, true);
 
   // --- Search history -------------------------------------------------------
 

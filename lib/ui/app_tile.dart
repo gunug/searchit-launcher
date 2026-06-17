@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 
+import '../l10n/strings.dart';
 import '../models/app_entry.dart';
 import '../services/app_service.dart';
 
@@ -172,7 +173,7 @@ Future<void> showAppActions(
             ),
             ListTile(
               leading: Icon(isLocked ? Icons.lock_open : Icons.lock_outline),
-              title: Text(isLocked ? '잠금 해제 / Unlock' : '잠금 / Lock'),
+              title: Text(isLocked ? tr.unlock : tr.lock),
               onTap: () {
                 Navigator.pop(sheetContext);
                 onToggleLock?.call();
@@ -180,7 +181,7 @@ Future<void> showAppActions(
             ),
             ListTile(
               leading: const Icon(Icons.history_toggle_off),
-              title: const Text('기록 삭제 / Clear History'),
+              title: Text(tr.clearHistory),
               onTap: () {
                 Navigator.pop(sheetContext);
                 onClearRecord?.call();
@@ -188,11 +189,9 @@ Future<void> showAppActions(
             ),
             ListTile(
               leading: const Icon(Icons.delete_outline),
-              title: const Text('삭제 / Delete'),
+              title: Text(tr.delete),
               enabled: !app.isSystem,
-              subtitle: app.isSystem
-                  ? const Text('시스템 앱은 삭제할 수 없습니다\nSystem apps cannot be uninstalled')
-                  : null,
+              subtitle: app.isSystem ? Text(tr.systemAppCannotUninstall) : null,
               onTap: () async {
                 Navigator.pop(sheetContext);
                 try {
@@ -206,7 +205,7 @@ Future<void> showAppActions(
             ),
             ListTile(
               leading: const Icon(Icons.info_outline),
-              title: const Text('앱 정보 / App Info'),
+              title: Text(tr.appInfo),
               onTap: () {
                 Navigator.pop(sheetContext);
                 AppService.openAppInfo(app.packageName);
@@ -214,7 +213,7 @@ Future<void> showAppActions(
             ),
             ListTile(
               leading: const Icon(Icons.shop_outlined),
-              title: const Text('스토어 / Play Store'),
+              title: Text(tr.playStore),
               onTap: () {
                 Navigator.pop(sheetContext);
                 AppService.openPlayStore(app.packageName);
@@ -231,28 +230,32 @@ void _showErrorDialog(BuildContext context, String message) {
   showDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setState) {
-        var copied = false;
-        return AlertDialog(
-          title: const Text('삭제 실패 / Delete Failed'),
-          content: SingleChildScrollView(child: SelectableText(message)),
-          actions: [
-            TextButton.icon(
-              icon: Icon(copied ? Icons.check : Icons.copy, size: 18),
-              label: Text(copied ? '복사됨 / Copied' : '복사 / Copy'),
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: message));
-                setState(() => copied = true);
-              },
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('닫기 / Close'),
-            ),
-          ],
-        );
-      },
-    ),
+    builder: (ctx) {
+      // 다이얼로그가 떠 있는 동안 유지돼야 하므로 builder 바깥에 둔다.
+      // (builder 안에 두면 리빌드마다 false로 초기화돼 '복사됨' 상태가 사라진다.)
+      var copied = false;
+      return StatefulBuilder(
+        builder: (ctx, setState) {
+          return AlertDialog(
+            title: Text(tr.deleteFailed),
+            content: SingleChildScrollView(child: SelectableText(message)),
+            actions: [
+              TextButton.icon(
+                icon: Icon(copied ? Icons.check : Icons.copy, size: 18),
+                label: Text(copied ? tr.copied : tr.copy),
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: message));
+                  setState(() => copied = true);
+                },
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(tr.close),
+              ),
+            ],
+          );
+        },
+      );
+    },
   );
 }

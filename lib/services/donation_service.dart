@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:in_app_purchase/in_app_purchase.dart';
 
+import '../l10n/strings.dart';
+
 class DonationService {
   DonationService._();
 
@@ -12,14 +14,20 @@ class DonationService {
     'donation_big',
   ];
 
-  static const _labels = {
-    'donation_coffee': '커피 한 잔 / Coffee',
-    'donation_drink': '음료 한 잔 / Drink',
-    'donation_meal': '식사 한 끼 / Meal',
-    'donation_big': '큰 후원 / Big Support',
-  };
-
-  static String labelFor(String productId) => _labels[productId] ?? productId;
+  static String labelFor(String productId) {
+    switch (productId) {
+      case 'donation_coffee':
+        return tr.donationCoffee;
+      case 'donation_drink':
+        return tr.donationDrink;
+      case 'donation_meal':
+        return tr.donationMeal;
+      case 'donation_big':
+        return tr.donationBig;
+      default:
+        return productId;
+    }
+  }
 
   static final _iap = InAppPurchase.instance;
   static StreamSubscription<List<PurchaseDetails>>? _sub;
