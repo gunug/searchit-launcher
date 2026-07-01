@@ -68,6 +68,8 @@ class S {
     required this.donationBig,
     required this.tutorialTitle,
     required this.tutorialBody,
+    required this.searchTutorialTitle,
+    required this.searchTutorialBody,
   });
 
   final String appList;
@@ -106,6 +108,8 @@ class S {
   final String donationBig;
   final String tutorialTitle;
   final String tutorialBody;
+  final String searchTutorialTitle;
+  final String searchTutorialBody;
 
   static const ko = S(
     appList: '앱 목록',
@@ -145,6 +149,10 @@ class S {
     tutorialTitle: '기본 홈 앱으로 설정',
     tutorialBody: '위쪽 🏠 버튼을 누르면 SearchIt을 기본 홈 앱으로 설정할 수 있어요.\n\n'
         '사용하다 불편하면 같은 버튼을 눌러 언제든 원래 쓰던 런처로 되돌릴 수 있습니다.',
+    searchTutorialTitle: '검색으로 더 빠르게',
+    searchTutorialBody: '왼쪽으로 살짝 밀면 검색 페이지로 넘어가요.\n\n'
+        '처음엔 앱을 일일이 찾기보다 검색창에 이름을 적는 게 훨씬 쉬워요. 초성만 입력해도 찾을 수 있어요.\n\n'
+        '몇 번 검색하다 보면 첫 페이지가 자주 쓰는 앱으로 저절로 채워집니다.',
   );
 
   static const en = S(
@@ -185,6 +193,10 @@ class S {
     tutorialTitle: 'Set as your home app',
     tutorialBody: 'Tap the 🏠 button at the top to set SearchIt as your default home app.\n\n'
         'If it ever feels inconvenient, tap the same button anytime to switch back to your previous launcher.',
+    searchTutorialTitle: 'Search to find apps faster',
+    searchTutorialBody: 'Swipe left to slide over to the search page.\n\n'
+        'At first, typing a name in the search box is much easier than hunting for each app. Even Korean initials (chosung) work.\n\n'
+        'After a few searches, your first page fills up with the apps you use most.',
   );
 
   static S of(AppLang lang) => lang == AppLang.ko ? ko : en;

@@ -176,6 +176,32 @@ class _HomeScreenState extends State<HomeScreen>
     );
     await StorageService.markHomeGuideShown();
     if (mounted) _startBlink();
+    if (!mounted) return;
+    await _showSearchGuideDialog();
+  }
+
+  /// 검색 페이지 안내(튜토리얼 2단계). 왼쪽 스와이프 → 검색.
+  Future<void> _showSearchGuideDialog() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            const Icon(Icons.search),
+            const SizedBox(width: 8),
+            Expanded(child: Text(tr.searchTutorialTitle)),
+          ],
+        ),
+        content: Text(tr.searchTutorialBody, style: const TextStyle(height: 1.4)),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(tr.ok),
+          ),
+        ],
+      ),
+    );
   }
 
   void _startBlink() => _blinkController.repeat(reverse: true);

@@ -50,7 +50,8 @@ Flutter 기반 Android 런처 앱. 한국어 초성 검색을 지원한다.
 빌드가 끝나면 **Python 스크립트로 직접 내부 테스트 트랙에 출시한다.** 사용자가 Play Console 웹을 열 필요 없다.
 
 #### 인증 정보
-- **서비스 계정 키**: `C:\Users\One The Lab\Downloads\effortless-launcher-e202f6c046c1.json`
+- **서비스 계정 키**: `G:\00_project\00-key\01_effortless_launcher\effortless-launcher-e202f6c046c1.json`
+  - 같은 폴더에 업로드 키스토어(`effortless-upload.jks`), `key.properties`, `pass.md`도 보관됨.
   - git에 커밋하지 말 것. 분실 시 Play Console → 설정 → API 액세스에서 재발급.
 - **패키지**: `com.onethelab.searchitlauncher`
 
@@ -61,7 +62,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2 import service_account
 
-KEY_FILE = r"C:\Users\One The Lab\Downloads\effortless-launcher-e202f6c046c1.json"
+KEY_FILE = r"G:\00_project\00-key\01_effortless_launcher\effortless-launcher-e202f6c046c1.json"
 PACKAGE  = "com.onethelab.searchitlauncher"
 AAB_PATH = r"<프로젝트루트>\build\app\outputs\bundle\release\app-release.aab"
 TRACK    = "internal"
@@ -108,7 +109,7 @@ print(f"Done! versionCode {bundle['versionCode']} → internal track")
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 
-KEY_FILE     = r"C:\Users\One The Lab\Downloads\effortless-launcher-e202f6c046c1.json"
+KEY_FILE     = r"G:\00_project\00-key\01_effortless_launcher\effortless-launcher-e202f6c046c1.json"
 PACKAGE      = "com.onethelab.searchitlauncher"
 VERSION_CODE = "<internal에서 검증한 versionCode>"
 KO_NOTES     = "<직전 프로덕션 버전 대비 변경 — 한국어>"
