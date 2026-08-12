@@ -181,7 +181,7 @@ flutter build appbundle
 | 패키지 | 버전 | 용도 |
 |---|---|---|
 | `shared_preferences` | ^2.3.2 | 검색 이력·최근 앱·뱃지·잠금 저장 |
-| `in_app_purchase` | ^3.2.0 | 후원(Play Billing 6.x) |
+| `in_app_purchase` | ^3.3.0 | 후원(Play Billing 8.x) |
 | `cupertino_icons` | ^1.0.8 | 아이콘 |
 | `flutter_launcher_icons` | ^0.14.4 | 런처 아이콘 생성 (dev) |
 
